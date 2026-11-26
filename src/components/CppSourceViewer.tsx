@@ -15,14 +15,14 @@ const SOURCE_FILES: SourceFileEntry[] = [
     label: 'koda_game_dev.cpp',
     path: '/engine/koda_game_dev.cpp',
     downloadName: 'koda_game_dev.cpp',
-    description: 'Núcleo Windows C++17 · Win32 + DirectX 11 + Dear ImGui + ECS + RDG + Shader Hot-Reload',
+    description: 'Núcleo C++17 Multiambiente · Auto DirectX 11 (Windows) / WebGPU (Browser) + Skeleton 64-Bones + Spatial-Hash AI',
   },
   {
     id: 'cmake',
     label: 'CMakeLists.txt',
     path: '/engine/CMakeLists.txt',
     downloadName: 'CMakeLists.txt',
-    description: 'Configuração CMake C++17 para Visual Studio 2022 x64, Windows SDK e DirectX 11',
+    description: 'Configuração CMake C++17 com auto-detecção Win32 DX11 e Emscripten WebGPU',
   },
   {
     id: 'linux',
@@ -143,9 +143,11 @@ export const CppSourceViewer: React.FC = () => {
           </div>
         </div>
 
-        <div className="bg-[#0B0D11] border border-white/10 rounded-md p-3 font-mono text-xs text-slate-300 overflow-x-auto space-y-1">
-          <div className="text-slate-500">Compilação via CMake (Visual Studio 17 2022, x64):</div>
-          <div>cmake -B build -G "Visual Studio 17 2022" -A x64 -DKODA_FETCH_IMGUI=ON && cmake --build build --config Release</div>
+        <div className="bg-[#0B0D11] border border-white/10 rounded-md p-3 font-mono text-xs text-slate-300 overflow-x-auto space-y-1.5">
+          <div className="text-slate-500">Windows x64 (DirectX 11 Auto via Visual Studio 2022):</div>
+          <div>cmake -B build-win -G "Visual Studio 17 2022" -A x64 -DKODA_FETCH_IMGUI=ON && cmake --build build-win --config Release</div>
+          <div className="text-slate-500 pt-1">Navegador WebGPU (Emscripten Wasm + WGPU):</div>
+          <div>emcmake cmake -B build-web -DKODA_RHI_BACKEND=WebGPU -DKODA_FETCH_IMGUI=ON && cmake --build build-web -j</div>
         </div>
       </div>
 

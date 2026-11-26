@@ -1277,6 +1277,7 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
                 entities={entities}
                 scripts={scripts}
                 parsedModels={parsedModels}
+                transitions={transitions}
                 selectedId={selectedId}
                 onSelectEntity={setSelectedId}
                 onTransformEntity={handleTransformEntity}

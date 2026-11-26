@@ -3,20 +3,37 @@ import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
-import type { ImportedModelAsset, ModelFormat, TimelineKeyframe } from '../types/engine';
+import type { ImportedModelAsset, ModelFormat, TimelineKeyframe, Vec3 } from '../types/engine';
+
+export interface BoneRestTransform {
+  pos: Vec3;
+  rot: Vec3;
+  scale: Vec3;
+}
 
 export interface ParsedModelResult {
   asset: ImportedModelAsset;
   root: THREE.Group;
   clips: THREE.AnimationClip[];
   bones: THREE.Bone[];
+  boneRestMap: Record<string, BoneRestTransform>;
 }
 
-function collectBonesAndNormScale(root: THREE.Object3D): { bones: THREE.Bone[]; scaleFactor: number; yOffset: number } {
+function collectBonesAndNormScale(root: THREE.Object3D): {
+  bones: THREE.Bone[];
+  boneRestMap: Record<string, BoneRestTransform>;
+  scaleFactor: number;
+  yOffset: number;
+} {
   const bones: THREE.Bone[] = [];
   root.traverse((obj) => {
     if ((obj as THREE.Bone).isBone) {
       bones.push(obj as THREE.Bone);
+    } else if ((obj as THREE.Mesh).isMesh) {
+      const m = obj as THREE.Mesh;
+      m.castShadow = true;
+      m.receiveShadow = true;
+      m.frustumCulled = true;
     }
   });
 
@@ -37,7 +54,22 @@ function collectBonesAndNormScale(root: THREE.Object3D): { bones: THREE.Bone[]; 
   const yOffset = Number.isFinite(scaledBox.min.y) ? -scaledBox.min.y : 0;
   root.position.y += yOffset;
 
-  return { bones, scaleFactor, yOffset };
+  const boneRestMap: Record<string, BoneRestTransform> = {};
+  root.traverse((obj) => {
+    if (obj !== root && obj.name) {
+      boneRestMap[obj.name] = {
+        pos: { x: obj.position.x, y: obj.position.y, z: obj.position.z },
+        rot: {
+          x: THREE.MathUtils.radToDeg(obj.rotation.x),
+          y: THREE.MathUtils.radToDeg(obj.rotation.y),
+          z: THREE.MathUtils.radToDeg(obj.rotation.z),
+        },
+        scale: { x: obj.scale.x, y: obj.scale.y, z: obj.scale.z },
+      };
+    }
+  });
+
+  return { bones, boneRestMap, scaleFactor, yOffset };
 }
 
 export async function parseModelFile(
@@ -65,7 +97,7 @@ export async function parseModelFile(
     clips = fbxGroup.animations || [];
   }
 
-  const { bones } = collectBonesAndNormScale(root);
+  const { bones, boneRestMap } = collectBonesAndNormScale(root);
   const boneNames = bones.map((b) => b.name).filter(Boolean);
 
   // Se nao houver THREE.Bone explicito, lista sub-grupos/malhas nomeadas para animacao de partes
@@ -99,30 +131,42 @@ export async function parseModelFile(
     root,
     clips,
     bones,
+    boneRestMap,
   };
 }
 
 export function cloneParsedModel(parsed: ParsedModelResult): {
   root: THREE.Group;
   bonesMap: Map<string, THREE.Object3D>;
+  boneRestMap: Record<string, BoneRestTransform>;
 } {
   const cloned = SkeletonUtils.clone(parsed.root) as THREE.Group;
   const bonesMap = new Map<string, THREE.Object3D>();
   cloned.traverse((obj) => {
     if (obj.name) bonesMap.set(obj.name, obj);
+    if ((obj as THREE.SkinnedMesh).isSkinnedMesh) {
+      const sk = obj as THREE.SkinnedMesh;
+      sk.frustumCulled = true;
+      sk.castShadow = true;
+      sk.receiveShadow = true;
+    } else if ((obj as THREE.Mesh).isMesh) {
+      const m = obj as THREE.Mesh;
+      m.castShadow = true;
+      m.receiveShadow = true;
+    }
   });
-  return { root: cloned, bonesMap };
+  return { root: cloned, bonesMap, boneRestMap: parsed.boneRestMap };
 }
 
 /**
  * Converte um AnimationClip do Blender (THREE.AnimationClip) para keyframes editaveis
- * na Linha do Tempo tradicional (amostrando rotacao Euler em graus dos ossos/nos).
+ * na Linha do Tempo tradicional (amostrando ate 36 ossos com poda de keyframes redundantes).
  */
 export function sampleClipToTimelineKeyframes(
   clip: THREE.AnimationClip,
   root: THREE.Group,
   boneNames: string[],
-  sampleCount = 10
+  sampleCount = 12
 ): TimelineKeyframe[] {
   const cloned = SkeletonUtils.clone(root) as THREE.Group;
   const mixer = new THREE.AnimationMixer(cloned);
@@ -134,27 +178,42 @@ export function sampleClipToTimelineKeyframes(
     if (o.name) boneMap.set(o.name, o);
   });
 
-  const targets = boneNames.slice(0, 14);
+  const targets = boneNames.slice(0, 36);
   const dur = Math.max(0.2, clip.duration);
   const keyframes: TimelineKeyframe[] = [];
+  const lastSampled = new Map<string, number>();
 
   for (let s = 0; s <= sampleCount; s++) {
     const t = (s / sampleCount) * dur;
     mixer.setTime(t);
     cloned.updateMatrixWorld(true);
+    const timeRounded = Number(t.toFixed(2));
+    const isEdge = s === 0 || s === sampleCount;
 
     for (const bname of targets) {
       const node = boneMap.get(bname);
       if (!node) continue;
-      const rx = Number(THREE.MathUtils.radToDeg(node.rotation.x).toFixed(1));
-      const ry = Number(THREE.MathUtils.radToDeg(node.rotation.y).toFixed(1));
-      const rz = Number(THREE.MathUtils.radToDeg(node.rotation.z).toFixed(1));
-      const timeRounded = Number(t.toFixed(2));
-      keyframes.push(
-        { id: `bkf_${bname}_x_${s}_${Math.random()}`, time: timeRounded, targetName: bname, property: 'rotation', axis: 'x', value: rx },
-        { id: `bkf_${bname}_y_${s}_${Math.random()}`, time: timeRounded, targetName: bname, property: 'rotation', axis: 'y', value: ry },
-        { id: `bkf_${bname}_z_${s}_${Math.random()}`, time: timeRounded, targetName: bname, property: 'rotation', axis: 'z', value: rz }
-      );
+      const vals: [axis: 'x' | 'y' | 'z', val: number][] = [
+        ['x', Number(THREE.MathUtils.radToDeg(node.rotation.x).toFixed(1))],
+        ['y', Number(THREE.MathUtils.radToDeg(node.rotation.y).toFixed(1))],
+        ['z', Number(THREE.MathUtils.radToDeg(node.rotation.z).toFixed(1))],
+      ];
+      for (const [axis, val] of vals) {
+        const key = `${bname}:${axis}`;
+        const prev = lastSampled.get(key);
+        if (isEdge || prev === undefined || Math.abs(val - prev) >= 0.4) {
+          lastSampled.set(key, val);
+          keyframes.push({
+            id: `bkf_${bname}_${axis}_${s}_${Math.random().toString(36).slice(2, 6)}`,
+            time: timeRounded,
+            targetName: bname,
+            property: 'rotation',
+            axis,
+            value: val,
+            interpolation: 'smooth',
+          });
+        }
+      }
     }
   }
 

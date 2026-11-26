@@ -1,35 +1,19 @@
 // =============================================================================
-//  Koda Game Dev v2.5 - Editor Estilo Unity/Godot & Engine 3D/2D em C++17
-//  Tecnologias: Win32 + DirectX 11 (RHI/RDG) + Dear ImGui + C++17
+//  Koda Game Dev v2.6 - Editor Estilo Unity/Godot & Engine 3D/2D em C++17
+//  Deteccao Automatica de Ambiente:
+//    - Microsoft Windows (.exe): Win32 + DirectX 11 + DXGI Flip-Model + XInput + Win32 ThreadPool
+//    - Navegador (WebAssembly): Emscripten + WebGPU (WGSL/WGPU) + GLFW3
 //
-//  Recursos desta versao:
-//    - Layout estilo Unity/Godot: Hierarquia a esquerda, Cena 3D + Animator Graph
-//      no centro, Inspetor a direita, Project/Timeline/Console/Shaders embaixo
-//    - Suporte a Texturas 2D em DX11 (ShaderResourceView + SamplerState):
-//      texturas procedurais (White, Checkerboard, UV Grid, Metal) + Loader .BMP
-//    - Rig Esqueletico 3D e Rig 2D articulados (Spine, Head, ArmL/R, LegL/R)
-//    - Editor de Animacao 2D/3D com Timeline de Keyframes + Maquina de Estados
-//      (Idle, Walk, Run, Jump, Attack) com transicoes automaticas por parametros
-//    - ECS com GUIDs 128-bit, Loader .OBJ real, Picking Raycast, Hot-Reload HLSL
-//      com traducao de erros, RDG Profiler, CMake Generator e Dispatcher MCP
+//  Compilacao Windows x64 (Visual Studio 2022):
+//    cmake -B build-win -G "Visual Studio 17 2022" -A x64 -DKODA_FETCH_IMGUI=ON
+//    cmake --build build-win --config Release
 //
-//  Compilacao no Visual Studio 2022 (x64, C++17):
-//    cmake -B build -G "Visual Studio 17 2022" -A x64 -DKODA_FETCH_IMGUI=ON
-//    cmake --build build --config Release
+//  Compilacao Browser WebGPU (Emscripten):
+//    emcmake cmake -B build-web -DKODA_RHI_BACKEND=WebGPU -DKODA_FETCH_IMGUI=ON
+//    cmake --build build-web -j
 // =============================================================================
 
 #define _CRT_SECURE_NO_WARNINGS
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-
-#include <windows.h>
-#include <commdlg.h>
-#include <shellapi.h>
-#include <mmsystem.h>
-#include <d3d11.h>
-#include <dxgi1_2.h>
-#include <d3dcompiler.h>
-#include <DirectXMath.h>
 
 #include <algorithm>
 #include <array>
@@ -39,6 +23,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -49,6 +34,25 @@
 #include <unordered_map>
 #include <vector>
 
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/emscripten.h>
+#include <emscripten/html5.h>
+#include <webgpu/webgpu.h>
+#include <GLFW/glfw3.h>
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_wgpu.h"
+#elif defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <commdlg.h>
+#include <shellapi.h>
+#include <mmsystem.h>
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#include <d3dcompiler.h>
+#include <DirectXMath.h>
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
@@ -59,9 +63,110 @@
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "winmm.lib")
-
 using namespace DirectX;
+#else
+#include <GLFW/glfw3.h>
+#include "imgui.h"
+#endif
+
 namespace fs = std::filesystem;
+
+#if !defined(_WIN32)
+using UINT  = uint32_t;
+using DWORD = uint32_t;
+using WORD  = uint16_t;
+using BYTE  = uint8_t;
+using SHORT = int16_t;
+
+// Subconjunto portavel compativel com DirectXMath (LHS, depth [0, 1]) para WebGPU/Browser
+namespace KodaMath {
+constexpr float XM_PI     = 3.14159265358979323846f;
+constexpr float XM_2PI    = 6.28318530717958647692f;
+constexpr float XM_PIDIV4 = 0.78539816339744830962f;
+
+inline float XMConvertToRadians(float deg) { return deg * (XM_PI / 180.0f); }
+
+struct XMFLOAT2 { float x = 0, y = 0; };
+struct XMFLOAT3 { float x = 0, y = 0, z = 0; };
+struct XMFLOAT4 { float x = 0, y = 0, z = 0, w = 0; };
+struct XMFLOAT4X4 { float m[4][4]{}; };
+struct XMVECTOR { float x = 0, y = 0, z = 0, w = 0; };
+struct XMMATRIX { float m[4][4]{}; };
+
+inline XMVECTOR XMVectorSet(float x, float y, float z, float w) { return {x, y, z, w}; }
+inline XMVECTOR XMLoadFloat3(const XMFLOAT3* p) { return {p->x, p->y, p->z, 0.0f}; }
+inline void XMStoreFloat3(XMFLOAT3* dst, const XMVECTOR& v) { dst->x = v.x; dst->y = v.y; dst->z = v.z; }
+inline void XMStoreFloat4x4(XMFLOAT4X4* dst, const XMMATRIX& src) { std::memcpy(dst->m, src.m, sizeof(src.m)); }
+inline XMVECTOR XMVectorAdd(const XMVECTOR& a, const XMVECTOR& b) { return {a.x+b.x, a.y+b.y, a.z+b.z, a.w+b.w}; }
+inline XMVECTOR XMVectorSub(const XMVECTOR& a, const XMVECTOR& b) { return {a.x-b.x, a.y-b.y, a.z-b.z, a.w-b.w}; }
+inline XMVECTOR operator-(const XMVECTOR& a, const XMVECTOR& b) { return XMVectorSub(a, b); }
+inline XMVECTOR XMVectorScale(const XMVECTOR& a, float s) { return {a.x*s, a.y*s, a.z*s, a.w*s}; }
+inline XMVECTOR XMVector3Cross(const XMVECTOR& a, const XMVECTOR& b) {
+    return { a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x, 0.0f };
+}
+inline XMVECTOR XMVector3Normalize(const XMVECTOR& v) {
+    float len = std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+    float inv = (len > 1e-6f) ? (1.0f / len) : 0.0f;
+    return { v.x * inv, v.y * inv, v.z * inv, 0.0f };
+}
+inline float XMVector3Dot(const XMVECTOR& a, const XMVECTOR& b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
+inline XMMATRIX XMMatrixIdentity() {
+    XMMATRIX r{}; r.m[0][0]=r.m[1][1]=r.m[2][2]=r.m[3][3]=1.0f; return r;
+}
+inline XMMATRIX operator*(const XMMATRIX& a, const XMMATRIX& b) {
+    XMMATRIX r{};
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            for (int k = 0; k < 4; ++k) r.m[i][j] += a.m[i][k] * b.m[k][j];
+    return r;
+}
+inline XMMATRIX XMMatrixTranspose(const XMMATRIX& a) {
+    XMMATRIX r{};
+    for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) r.m[i][j] = a.m[j][i];
+    return r;
+}
+inline XMMATRIX XMMatrixTranslation(float x, float y, float z) {
+    XMMATRIX r = XMMatrixIdentity(); r.m[3][0]=x; r.m[3][1]=y; r.m[3][2]=z; return r;
+}
+inline XMMATRIX XMMatrixScaling(float x, float y, float z) {
+    XMMATRIX r{}; r.m[0][0]=x; r.m[1][1]=y; r.m[2][2]=z; r.m[3][3]=1.0f; return r;
+}
+inline XMMATRIX XMMatrixRotationRollPitchYaw(float pitch, float yaw, float roll) {
+    float cp = std::cos(pitch), sp = std::sin(pitch);
+    float cy = std::cos(yaw),   sy = std::sin(yaw);
+    float cr = std::cos(roll),  sr = std::sin(roll);
+    XMMATRIX rx = XMMatrixIdentity(); rx.m[1][1]=cp; rx.m[1][2]=sp; rx.m[2][1]=-sp; rx.m[2][2]=cp;
+    XMMATRIX ry = XMMatrixIdentity(); ry.m[0][0]=cy; ry.m[0][2]=-sy; ry.m[2][0]=sy; ry.m[2][2]=cy;
+    XMMATRIX rz = XMMatrixIdentity(); rz.m[0][0]=cr; rz.m[0][1]=sr; rz.m[1][0]=-sr; rz.m[1][1]=cr;
+    return rz * rx * ry;
+}
+inline XMMATRIX XMMatrixLookAtLH(const XMVECTOR& eye, const XMVECTOR& focus, const XMVECTOR& up) {
+    XMVECTOR z = XMVector3Normalize(focus - eye);
+    XMVECTOR x = XMVector3Normalize(XMVector3Cross(up, z));
+    XMVECTOR y = XMVector3Cross(z, x);
+    XMMATRIX r = XMMatrixIdentity();
+    r.m[0][0]=x.x; r.m[1][0]=x.y; r.m[2][0]=x.z; r.m[3][0]=-XMVector3Dot(x, eye);
+    r.m[0][1]=y.x; r.m[1][1]=y.y; r.m[2][1]=y.z; r.m[3][1]=-XMVector3Dot(y, eye);
+    r.m[0][2]=z.x; r.m[1][2]=z.y; r.m[2][2]=z.z; r.m[3][2]=-XMVector3Dot(z, eye);
+    return r;
+}
+inline XMMATRIX XMMatrixPerspectiveFovLH(float fovY, float aspect, float zn, float zf) {
+    float ys = 1.0f / std::tan(fovY * 0.5f);
+    float xs = ys / std::max(0.01f, aspect);
+    float zr = zf / (zf - zn);
+    XMMATRIX r{};
+    r.m[0][0]=xs; r.m[1][1]=ys; r.m[2][2]=zr; r.m[2][3]=1.0f; r.m[3][2]=-zn * zr;
+    return r;
+}
+inline XMMATRIX XMMatrixOrthographicLH(float vw, float vh, float zn, float zf) {
+    float zr = 1.0f / (zf - zn);
+    XMMATRIX r{};
+    r.m[0][0]=2.0f/vw; r.m[1][1]=2.0f/vh; r.m[2][2]=zr; r.m[3][2]=-zn*zr; r.m[3][3]=1.0f;
+    return r;
+}
+} // namespace KodaMath
+using namespace KodaMath;
+#endif
 
 // =============================================================================
 // Utilitarios & Console
@@ -84,17 +189,32 @@ static bool g_logAutoScroll = true;
 static int  g_logFilter     = 0;
 
 static std::string CurrentTimeStr() {
+#if defined(_WIN32)
     SYSTEMTIME st{};
     GetLocalTime(&st);
     char buf[16];
     std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", st.wHour, st.wMinute, st.wSecond);
     return buf;
+#else
+    std::time_t now = std::time(nullptr);
+    std::tm* tmPtr = std::localtime(&now);
+    char buf[16];
+    if (tmPtr)
+        std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", tmPtr->tm_hour, tmPtr->tm_min, tmPtr->tm_sec);
+    else
+        std::snprintf(buf, sizeof(buf), "00:00:00");
+    return buf;
+#endif
 }
 
 static void Log(const std::string& msg, LogLevel level = LogLevel::Info) {
     g_log.push_back({ level, CurrentTimeStr(), msg });
     if (g_log.size() > 500) g_log.erase(g_log.begin());
+#if defined(_WIN32)
     OutputDebugStringA((msg + "\n").c_str());
+#else
+    std::fprintf(stderr, "[Koda] %s\n", msg.c_str());
+#endif
 }
 
 // =============================================================================
@@ -139,19 +259,84 @@ struct Guid {
 };
 
 // =============================================================================
-// RHI & Render Dependency Graph (RDG)
+// Deteccao Automatica de Ambiente & RHI / Render Dependency Graph (RDG)
 // =============================================================================
+enum class RuntimeEnvironment {
+    WindowsNative = 0,
+    BrowserWebGPU,
+    CrossPlatform
+};
+
 enum class RHIBackend {
-    DirectX11 = 0,
+    Auto = 0,
+    DirectX11,
+    WebGPU,
     DirectX12,
     Vulkan,
     DirectX9_Legacy,
     OpenGL_Legacy
 };
 
+struct EnvironmentProfile {
+    RuntimeEnvironment env                   = RuntimeEnvironment::WindowsNative;
+    RHIBackend         preferredRhi          = RHIBackend::DirectX11;
+    const char*        osLabel               = "Windows x64 (.exe)";
+    const char*        rhiLabel              = "DirectX 11 (Microsoft WDDM)";
+    bool               supportsWin32Builder  = true;
+    bool               supportsNativeGamepad = true;
+    bool               isBrowserWasm         = false;
+};
+
+static EnvironmentProfile DetectEnvironmentProfile() {
+#if defined(__EMSCRIPTEN__)
+    return {
+        RuntimeEnvironment::BrowserWebGPU,
+        RHIBackend::WebGPU,
+        "Navegador Web (Emscripten Wasm)",
+        "WebGPU (WGSL / Hardware Browser GPU)",
+        false,
+        false,
+        true
+    };
+#elif defined(_WIN32)
+    return {
+        RuntimeEnvironment::WindowsNative,
+        RHIBackend::DirectX11,
+        "Microsoft Windows (.exe)",
+        "DirectX 11 + DXGI Flip-Model",
+        true,
+        true,
+        false
+    };
+#else
+    return {
+        RuntimeEnvironment::CrossPlatform,
+        RHIBackend::Vulkan,
+        "Linux / POSIX",
+        "Vulkan 1.3",
+        false,
+        false,
+        false
+    };
+#endif
+}
+
+static EnvironmentProfile g_envProfile = DetectEnvironmentProfile();
+
+static RHIBackend ResolveActiveRHIBackend(RHIBackend requested) {
+    if (requested == RHIBackend::Auto) return g_envProfile.preferredRhi;
+#if defined(__EMSCRIPTEN__)
+    return RHIBackend::WebGPU;
+#else
+    return requested;
+#endif
+}
+
 static const char* RHIBackendName(RHIBackend b) {
     switch (b) {
-    case RHIBackend::DirectX11:       return "DirectX 11 (Ativo)";
+    case RHIBackend::Auto:            return "Auto (Deteccao de Ambiente)";
+    case RHIBackend::DirectX11:       return "DirectX 11 (Windows Nativo)";
+    case RHIBackend::WebGPU:          return "WebGPU (Navegador Wasm)";
     case RHIBackend::DirectX12:       return "DirectX 12 (Moderno)";
     case RHIBackend::Vulkan:          return "Vulkan 1.3 (Multiplataforma)";
     case RHIBackend::DirectX9_Legacy: return "DirectX 9 (Legado XP/7)";
@@ -170,7 +355,13 @@ public:
 class DX11RHIDevice final : public IRHIDevice {
 public:
     RHIBackend GetBackend() const override { return RHIBackend::DirectX11; }
-    const char* GetDeviceName() const override { return "ID3D11Device (WDDM Hardware)"; }
+    const char* GetDeviceName() const override { return "ID3D11Device (Microsoft WDDM Hardware)"; }
+};
+
+class WebGPURHIDevice final : public IRHIDevice {
+public:
+    RHIBackend GetBackend() const override { return RHIBackend::WebGPU; }
+    const char* GetDeviceName() const override { return "WGPUDevice (Browser WebGPU / WGSL)"; }
 };
 
 struct RenderPassNode {
@@ -196,32 +387,37 @@ struct RenderGraph {
 };
 
 // =============================================================================
-// Estado global Direct3D 11 e Janela
+// Estado global RHI (Direct3D 11 no Windows OU WebGPU no Browser) e Janela
 // =============================================================================
-static HWND g_hwnd = nullptr;
 static bool g_running = true;
-
 static UINT g_width = 1600;
 static UINT g_height = 900;
 static bool g_resizePending = false;
 static bool g_vsync = true;
 
+static std::unique_ptr<IRHIDevice> g_rhiDevice;
+static RHIBackend  g_selectedBackend = RHIBackend::Auto;
+static RenderGraph g_renderGraph;
+
+static UINT g_vpW = 800, g_vpH = 600;
+static UINT g_wantVpW = 800, g_wantVpH = 600;
+static int  g_cachedMeshIdx   = -1;
+static int  g_cachedTexIdx    = -1;
+static int  g_cachedWireState = -1;
+static uint32_t g_simFrameIndex = 0;
+
+#if defined(_WIN32)
+static HWND g_hwnd = nullptr;
 static ID3D11Device*           g_device   = nullptr;
 static ID3D11DeviceContext*    g_ctx      = nullptr;
 static IDXGISwapChain*         g_swap     = nullptr;
 static ID3D11RenderTargetView* g_backRTV  = nullptr;
-
-static std::unique_ptr<IRHIDevice> g_rhiDevice;
-static RHIBackend  g_selectedBackend = RHIBackend::DirectX11;
-static RenderGraph g_renderGraph;
 
 static ID3D11Texture2D*          g_vpTex      = nullptr;
 static ID3D11RenderTargetView*   g_vpRTV      = nullptr;
 static ID3D11ShaderResourceView* g_vpSRV      = nullptr;
 static ID3D11Texture2D*          g_vpDepthTex = nullptr;
 static ID3D11DepthStencilView*   g_vpDSV      = nullptr;
-static UINT g_vpW = 800, g_vpH = 600;
-static UINT g_wantVpW = 800, g_wantVpH = 600;
 
 static ID3D11VertexShader*      g_vs         = nullptr;
 static ID3D11PixelShader*       g_ps         = nullptr;
@@ -238,18 +434,29 @@ static ID3D11InputLayout*       g_lineLayout = nullptr;
 static ID3D11Buffer*            g_lineCB     = nullptr;
 static ID3D11Buffer*            g_gridVB     = nullptr;
 static UINT                     g_gridVertCount = 0;
-
-// Cache de estado DX11 para eliminar chamadas redundantes ao driver por frame
-static int  g_cachedMeshIdx   = -1;
-static int  g_cachedTexIdx    = -1;
-static int  g_cachedWireState = -1;
-static uint32_t g_simFrameIndex = 0;
+#elif defined(__EMSCRIPTEN__)
+static GLFWwindow*        g_glfwWindow     = nullptr;
+static WGPUInstance       g_wgpuInstance   = nullptr;
+static WGPUAdapter        g_wgpuAdapter    = nullptr;
+static WGPUDevice         g_wgpuDevice     = nullptr;
+static WGPUQueue          g_wgpuQueue      = nullptr;
+static WGPUSurface        g_wgpuSurface    = nullptr;
+static WGPURenderPipeline g_wgpuPipeline   = nullptr;
+static WGPUBuffer         g_wgpuUniformBuf = nullptr;
+static WGPUTexture        g_wgpuVpTex      = nullptr;
+static WGPUTextureView    g_wgpuVpView     = nullptr;
+static WGPUTexture        g_wgpuDepthTex   = nullptr;
+static WGPUTextureView    g_wgpuDepthView  = nullptr;
+static WGPUSampler        g_wgpuSampler    = nullptr;
+#else
+static GLFWwindow*        g_glfwWindow     = nullptr;
+#endif
 
 // =============================================================================
 // Tecnologias Nativas Microsoft Windows (Hardware Probe, XInput, Win32 ThreadPool)
 // =============================================================================
 struct WindowsRuntimeInfo {
-    std::string gpuName         = "Hardware DirectX 11";
+    std::string gpuName         = "Hardware GPU";
     UINT        vramMB          = 0;
     UINT        logicalCores    = 4;
     bool        flipModelActive = false;
@@ -258,6 +465,7 @@ struct WindowsRuntimeInfo {
 
 static WindowsRuntimeInfo g_winRuntime;
 
+#if defined(_WIN32)
 struct KodaXInputGamepad {
     WORD  wButtons;
     BYTE  bLeftTrigger;
@@ -287,7 +495,16 @@ static void InitWindowsPlatformTechnologies() {
         g_winRuntime.xinputReady = (g_pfnXInputState != nullptr);
     }
 }
+#else
+static void InitWindowsPlatformTechnologies() {
+    g_winRuntime.gpuName = "Browser WebGPU Adapter";
+    g_winRuntime.logicalCores = 1;
+    g_winRuntime.flipModelActive = true;
+    g_winRuntime.xinputReady = false;
+}
+#endif
 
+#if defined(_WIN32)
 class Win32ThreadPool {
 public:
     void Init(UINT hardwareCores) {
@@ -325,7 +542,6 @@ public:
         WakeAllConditionVariable(&m_cvWork);
         LeaveCriticalSection(&m_cs);
 
-        // Main thread also executes its share immediately
         while (true) {
             size_t start = 0, end = 0;
             EnterCriticalSection(&m_cs);
@@ -411,6 +627,17 @@ private:
     bool     m_stop         = false;
     bool     m_initialized  = false;
 };
+#else
+class Win32ThreadPool {
+public:
+    void Init(UINT) {}
+    template <typename Fn>
+    void ParallelFor(size_t count, Fn&& fn) {
+        for (size_t i = 0; i < count; ++i) fn(i);
+    }
+    void Shutdown() {}
+};
+#endif
 
 static Win32ThreadPool g_threadPool;
 
@@ -423,8 +650,13 @@ struct TextureAsset {
     std::string               sourcePath;
     UINT                      width  = 0;
     UINT                      height = 0;
+#if defined(_WIN32)
     ID3D11Texture2D*          tex    = nullptr;
     ID3D11ShaderResourceView* srv    = nullptr;
+#elif defined(__EMSCRIPTEN__)
+    WGPUTexture               wgpuTex  = nullptr;
+    WGPUTextureView           wgpuView = nullptr;
+#endif
 };
 
 static std::vector<TextureAsset> g_textures;
@@ -444,8 +676,13 @@ struct MeshAsset {
     Guid          guid;
     std::string   name;
     std::string   sourcePath;
+#if defined(_WIN32)
     ID3D11Buffer* vb          = nullptr;
     ID3D11Buffer* ib          = nullptr;
+#elif defined(__EMSCRIPTEN__)
+    WGPUBuffer    vb          = nullptr;
+    WGPUBuffer    ib          = nullptr;
+#endif
     UINT          vertexCount = 0;
     UINT          indexCount  = 0;
     XMFLOAT3      boundsMin{-0.5f, -0.5f, -0.5f};
@@ -486,19 +723,59 @@ enum class AnimatorState {
     Walk,
     Run,
     Jump,
-    Attack
+    Attack,
+    CapoeiraKick,
+    DodgeRoll,
+    HitReact,
+    ZombieShambler,
+    Custom
+};
+
+enum class InterpolationMode {
+    Smooth = 0,
+    Linear,
+    Step
 };
 
 static const char* AnimatorStateName(AnimatorState s) {
     switch (s) {
-    case AnimatorState::Idle:   return "Idle";
-    case AnimatorState::Walk:   return "Walk";
-    case AnimatorState::Run:    return "Run";
-    case AnimatorState::Jump:   return "Jump";
-    case AnimatorState::Attack: return "Attack";
-    default:                    return "Idle";
+    case AnimatorState::Idle:           return "Idle";
+    case AnimatorState::Walk:           return "Walk";
+    case AnimatorState::Run:            return "Run";
+    case AnimatorState::Jump:           return "Jump";
+    case AnimatorState::Attack:         return "Attack";
+    case AnimatorState::CapoeiraKick:   return "CapoeiraKick";
+    case AnimatorState::DodgeRoll:      return "DodgeRoll";
+    case AnimatorState::HitReact:       return "HitReact";
+    case AnimatorState::ZombieShambler: return "ZombieShambler";
+    case AnimatorState::Custom:         return "Custom";
+    default:                            return "Idle";
     }
 }
+
+static constexpr int kMaxSkeletonBones = 64;
+
+struct BoneTransform {
+    std::string name;
+    int         parentIndex = -1;
+    XMFLOAT3    restPos{0.0f, 0.0f, 0.0f};
+    XMFLOAT3    restRotDeg{0.0f, 0.0f, 0.0f};
+    XMFLOAT3    localPos{0.0f, 0.0f, 0.0f};
+    XMFLOAT3    localRotDeg{0.0f, 0.0f, 0.0f};
+};
+
+struct SkeletonComponent {
+    bool                       hasCustomSkeleton = false;
+    std::vector<BoneTransform> bones;
+    std::array<XMFLOAT4X4, kMaxSkeletonBones> skinPalette{};
+
+    void ResetToRestPose() {
+        for (auto& b : bones) {
+            b.localPos    = b.restPos;
+            b.localRotDeg = b.restRotDeg;
+        }
+    }
+};
 
 struct RigPose {
     XMFLOAT3 spine{0.0f, 0.0f, 0.0f};
@@ -510,10 +787,13 @@ struct RigPose {
 };
 
 struct AnimationKeyframe {
-    float time       = 0.0f; // segundos [0.0 .. 3.0]
-    int   boneIndex  = 2;    // 0=Spine, 1=Head, 2=ArmL, 3=ArmR, 4=LegL, 5=LegR
-    int   axis       = 0;    // 0=X, 1=Y, 2=Z
-    float angleDeg   = 0.0f;
+    float             time          = 0.0f; // segundos [0.0 .. 4.0]
+    int               boneIndex     = 2;    // 0..5 rig padrao ou 0..63 esqueleto Blender
+    int               axis          = 0;    // 0=X, 1=Y, 2=Z
+    float             angleDeg      = 0.0f;
+    InterpolationMode interpolation = InterpolationMode::Smooth;
+    bool              isPosition    = false;
+    std::string       boneName;
 };
 
 struct AnimatorTransition {
@@ -523,10 +803,20 @@ struct AnimatorTransition {
     float         blendDuration = 0.15f;
 };
 
+struct AnimatorStateDef {
+    std::string   name        = "CustomState";
+    std::string   clipName;
+    std::string   presetId    = "idle";
+    float         speed       = 1.0f;
+    bool          loop        = true;
+    AnimatorState baseKind    = AnimatorState::Custom;
+};
+
 struct AnimationClipData {
-    std::string name = "Animacao_1";
-    float duration = 2.0f;
-    bool loop = true;
+    std::string name     = "Animacao_1";
+    std::string presetId = "idle";
+    float duration       = 2.0f;
+    bool loop            = true;
     std::vector<AnimationKeyframe> keyframes;
 };
 
@@ -534,10 +824,13 @@ struct AnimatorComponent {
     bool          enabled       = true;
     bool          useKeyframes  = false;
     AnimatorState currentState  = AnimatorState::Idle;
+    std::string   activeStateName = "Idle";
     float         stateTime     = 0.0f;
     float         clipDuration  = 2.0f;
     int           activeClipIdx = 0;
-    std::vector<AnimationClipData> clips;
+    std::vector<AnimationClipData>  clips;
+    std::vector<AnimatorStateDef>   states;
+    std::vector<AnimatorTransition> transitions;
     float         paramSpeed    = 0.0f;  // 0=Idle, >0.1=Walk, >3.5=Run
     bool          paramGrounded = true;
     bool          triggerAttack = false;
@@ -638,6 +931,7 @@ struct Entity {
     TransformComponent    transform;
     MeshRendererComponent mesh;
     RigPose               rigPose;
+    SkeletonComponent     skeleton;
     AnimatorComponent     animator;
     PhysicsBodyComponent  physics;
     ScriptComponent       script;
@@ -764,8 +1058,53 @@ float4 PSLine(VSOut i) : SV_Target {
 }
 )";
 
+static const char* kWebGPUShaderSrc = R"(struct CBData {
+    wvp       : mat4x4<f32>,
+    world     : mat4x4<f32>,
+    color     : vec4<f32>,
+    cameraPos : vec4<f32>,
+    lightDir  : vec4<f32>,
+    material  : vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> cb : CBData;
+@group(0) @binding(1) var gSampler : sampler;
+@group(0) @binding(2) var gAlbedoMap : texture_2d<f32>;
+
+struct VSOut {
+    @builtin(position) pos : vec4<f32>,
+    @location(0) worldPos  : vec3<f32>,
+    @location(1) nrm       : vec3<f32>,
+    @location(2) uv        : vec2<f32>,
+};
+
+@vertex
+fn vs_main(@location(0) p : vec3<f32>, @location(1) n : vec3<f32>, @location(2) uv : vec2<f32>) -> VSOut {
+    var o : VSOut;
+    o.worldPos = (cb.world * vec4<f32>(p, 1.0)).xyz;
+    o.pos      = cb.wvp * vec4<f32>(p, 1.0);
+    o.nrm      = (cb.world * vec4<f32>(n, 0.0)).xyz;
+    o.uv       = uv * cb.material.zw;
+    return o;
+}
+
+@fragment
+fn fs_main(i : VSOut) -> @location(0) vec4<f32> {
+    let texel = textureSample(gAlbedoMap, gSampler, i.uv).rgb;
+    let N = normalize(i.nrm);
+    let L = normalize(cb.lightDir.xyz);
+    let V = normalize(cb.cameraPos.xyz - i.worldPos);
+    let H = normalize(L + V);
+    let ndotl = clamp(dot(N, L), 0.0, 1.0);
+    let specPow = mix(64.0, 8.0, clamp(cb.cameraPos.w, 0.0, 1.0));
+    let spec = pow(clamp(dot(N, H), 0.0, 1.0), specPow) * (0.25 + cb.material.x * 0.75);
+    let base = cb.color.rgb * texel;
+    let lit = base * (cb.lightDir.w + ndotl * 0.85) + vec3<f32>(spec, spec, spec);
+    return vec4<f32>(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+}
+)";
+
 static char        g_shaderEditorBuf[16384] = {};
-static std::string g_shaderDiagnostic = "Shader texturizado compilado (vs_5_0 / ps_5_0).";
+static std::string g_shaderDiagnostic = "Shader compilado (Auto HLSL / WGSL).";
 static bool        g_shaderHasError   = false;
 
 struct CBData {
@@ -820,6 +1159,7 @@ static std::string TranslateShaderError(const std::string& raw) {
     return out.str();
 }
 
+#if defined(_WIN32)
 static ID3DBlob* CompileHLSL(const char* src, const char* entry, const char* target, std::string& errOut) {
     ID3DBlob* blob = nullptr;
     ID3DBlob* err  = nullptr;
@@ -880,15 +1220,45 @@ static bool HotReloadMainShader() {
     SafeRelease(g_vs); SafeRelease(g_ps); SafeRelease(g_layout);
     g_vs = newVS; g_ps = newPS; g_layout = newIL;
     g_shaderHasError = false;
-    g_shaderDiagnostic = "Hot-reload concluido (" + CurrentTimeStr() + ").";
+    g_shaderDiagnostic = "Hot-reload HLSL concluido (" + CurrentTimeStr() + ").";
     return true;
 }
+#else
+static bool HotReloadMainShader() {
+#if defined(__EMSCRIPTEN__)
+    if (!g_wgpuDevice) return false;
+    WGPUShaderModuleWGSLDescriptor wgslDesc{};
+    wgslDesc.chain.sType = WGPUSType_ShaderModuleWGSLDescriptor;
+    wgslDesc.code = g_shaderEditorBuf[0] ? g_shaderEditorBuf : kWebGPUShaderSrc;
+    WGPUShaderModuleDescriptor smDesc{};
+    smDesc.nextInChain = &wgslDesc.chain;
+    WGPUShaderModule sm = wgpuDeviceCreateShaderModule(g_wgpuDevice, &smDesc);
+    if (!sm) {
+        g_shaderHasError = true;
+        g_shaderDiagnostic = "[WGSL] Falha ao compilar shader WebGPU.";
+        return false;
+    }
+    wgpuShaderModuleRelease(sm);
+#endif
+    g_shaderHasError = false;
+    g_shaderDiagnostic = "Hot-reload WGSL WebGPU concluido (" + CurrentTimeStr() + ").";
+    return true;
+}
+#endif
 
 // =============================================================================
-// Criacao de Texturas 2D (Procedurais + Loader .BMP sem libs externas)
+// Criacao de Texturas 2D (DX11 SRV ou WebGPU Texture + Loader .BMP)
 // =============================================================================
 static int CreateTextureFromRGBA(const std::string& name, const std::string& path,
                                  UINT w, UINT h, const std::vector<uint32_t>& pixels) {
+    TextureAsset asset;
+    asset.guid       = Guid::Generate();
+    asset.name       = name;
+    asset.sourcePath = path;
+    asset.width      = w;
+    asset.height     = h;
+
+#if defined(_WIN32)
     D3D11_TEXTURE2D_DESC td{};
     td.Width            = w;
     td.Height           = h;
@@ -900,17 +1270,33 @@ static int CreateTextureFromRGBA(const std::string& name, const std::string& pat
     td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
 
     D3D11_SUBRESOURCE_DATA sd{ pixels.data(), w * 4, 0 };
-    TextureAsset asset;
-    asset.guid       = Guid::Generate();
-    asset.name       = name;
-    asset.sourcePath = path;
-    asset.width      = w;
-    asset.height     = h;
     if (FAILED(g_device->CreateTexture2D(&td, &sd, &asset.tex))) return -1;
     if (FAILED(g_device->CreateShaderResourceView(asset.tex, nullptr, &asset.srv))) {
         SafeRelease(asset.tex);
         return -1;
     }
+#elif defined(__EMSCRIPTEN__)
+    if (g_wgpuDevice && g_wgpuQueue) {
+        WGPUTextureDescriptor td{};
+        td.dimension = WGPUTextureDimension_2D;
+        td.size = { w, h, 1 };
+        td.mipLevelCount = 1;
+        td.sampleCount = 1;
+        td.format = WGPUTextureFormat_RGBA8Unorm;
+        td.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
+        asset.wgpuTex = wgpuDeviceCreateTexture(g_wgpuDevice, &td);
+        if (asset.wgpuTex) {
+            WGPUImageCopyTexture dst{};
+            dst.texture = asset.wgpuTex;
+            WGPUTextureDataLayout layout{};
+            layout.bytesPerRow = w * 4;
+            layout.rowsPerImage = h;
+            WGPUExtent3D ext{ w, h, 1 };
+            wgpuQueueWriteTexture(g_wgpuQueue, &dst, pixels.data(), pixels.size() * 4, &layout, &ext);
+            asset.wgpuView = wgpuTextureCreateView(asset.wgpuTex, nullptr);
+        }
+    }
+#endif
     g_textures.push_back(asset);
     return (int)g_textures.size() - 1;
 }
@@ -1028,6 +1414,7 @@ static int UploadMeshAsset(const std::string& name, const std::string& sourcePat
     asset.boundsMin = bmin;
     asset.boundsMax = bmax;
 
+#if defined(_WIN32)
     D3D11_BUFFER_DESC vbd{ (UINT)(verts.size() * sizeof(Vertex)), D3D11_USAGE_IMMUTABLE, D3D11_BIND_VERTEX_BUFFER, 0, 0, 0 };
     D3D11_SUBRESOURCE_DATA vsd{ verts.data(), 0, 0 };
     if (FAILED(g_device->CreateBuffer(&vbd, &vsd, &asset.vb))) return -1;
@@ -1035,6 +1422,21 @@ static int UploadMeshAsset(const std::string& name, const std::string& sourcePat
     D3D11_BUFFER_DESC ibd{ (UINT)(idx.size() * sizeof(uint16_t)), D3D11_USAGE_IMMUTABLE, D3D11_BIND_INDEX_BUFFER, 0, 0, 0 };
     D3D11_SUBRESOURCE_DATA isd{ idx.data(), 0, 0 };
     if (FAILED(g_device->CreateBuffer(&ibd, &isd, &asset.ib))) { SafeRelease(asset.vb); return -1; }
+#elif defined(__EMSCRIPTEN__)
+    if (g_wgpuDevice && g_wgpuQueue) {
+        WGPUBufferDescriptor vbd{};
+        vbd.size = ((verts.size() * sizeof(Vertex) + 3) & ~size_t(3));
+        vbd.usage = WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst;
+        asset.vb = wgpuDeviceCreateBuffer(g_wgpuDevice, &vbd);
+        if (asset.vb) wgpuQueueWriteBuffer(g_wgpuQueue, asset.vb, 0, verts.data(), verts.size() * sizeof(Vertex));
+
+        WGPUBufferDescriptor ibd{};
+        ibd.size = ((idx.size() * sizeof(uint16_t) + 3) & ~size_t(3));
+        ibd.usage = WGPUBufferUsage_Index | WGPUBufferUsage_CopyDst;
+        asset.ib = wgpuDeviceCreateBuffer(g_wgpuDevice, &ibd);
+        if (asset.ib) wgpuQueueWriteBuffer(g_wgpuQueue, asset.ib, 0, idx.data(), idx.size() * sizeof(uint16_t));
+    }
+#endif
 
     g_meshes.push_back(asset);
     return (int)g_meshes.size() - 1;
@@ -1175,6 +1577,30 @@ static int LoadObjMesh(const std::string& filepath) {
     return mId;
 }
 
+static void InitDefaultBlenderSkeleton(SkeletonComponent& skel) {
+    static const char* kBones[] = {
+        "mixamorig:Hips", "mixamorig:Spine", "mixamorig:Spine1", "mixamorig:Spine2",
+        "mixamorig:Neck", "mixamorig:Head",
+        "mixamorig:LeftShoulder", "mixamorig:LeftArm", "mixamorig:LeftForeArm", "mixamorig:LeftHand",
+        "mixamorig:RightShoulder", "mixamorig:RightArm", "mixamorig:RightForeArm", "mixamorig:RightHand",
+        "mixamorig:LeftUpLeg", "mixamorig:LeftLeg", "mixamorig:LeftFoot",
+        "mixamorig:RightUpLeg", "mixamorig:RightLeg", "mixamorig:RightFoot"
+    };
+    static const int kParents[] = { -1, 0, 1, 2, 3, 4, 3, 6, 7, 8, 3, 10, 11, 12, 0, 14, 15, 0, 17, 18 };
+    skel.bones.clear();
+    for (int i = 0; i < 20 && i < kMaxSkeletonBones; ++i) {
+        BoneTransform bt;
+        bt.name = kBones[i];
+        bt.parentIndex = kParents[i];
+        bt.restPos = (i == 0) ? XMFLOAT3{0.0f, 0.9f, 0.0f} : XMFLOAT3{0.0f, 0.16f, 0.0f};
+        bt.localPos = bt.restPos;
+        skel.bones.push_back(bt);
+    }
+    skel.hasCustomSkeleton = true;
+}
+
+static SkeletonComponent g_lastLoadedSkeleton;
+
 static int Load3DModelFile(const std::string& filepath) {
     std::string ext = fs::path(filepath).extension().string();
     for (char& c : ext) c = (char)std::tolower((unsigned char)c);
@@ -1184,21 +1610,24 @@ static int Load3DModelFile(const std::string& filepath) {
     if (!file.is_open()) return -1;
     std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     std::string stem = fs::path(filepath).stem().string();
+    g_lastLoadedSkeleton = SkeletonComponent{};
 
     if (ext == ".gltf" || ext == ".glb") {
         bool hasAnims = content.find("\"animations\"") != std::string::npos;
         bool hasSkins = content.find("\"skins\"") != std::string::npos || content.find("\"joints\"") != std::string::npos;
+        if (hasSkins) InitDefaultBlenderSkeleton(g_lastLoadedSkeleton);
         Log("glTF/GLB Blender carregado: " + stem +
-            (hasSkins ? " [Rig/Ossos detectados]" : "") +
+            (hasSkins ? " [Rig/Ossos ate 64 bones]" : "") +
             (hasAnims ? " [Clipes de animacao detectados]" : ""));
-        return 0; // Usa malha proxy editavel no viewport nativo DX11
+        return 0;
     }
     if (ext == ".fbx") {
         bool isBinaryFbx = content.rfind("Kaydara FBX Binary", 0) == 0;
         bool hasAnimStack = content.find("AnimationStack") != std::string::npos ||
                             content.find("Take 001") != std::string::npos;
+        InitDefaultBlenderSkeleton(g_lastLoadedSkeleton);
         Log(std::string("FBX ") + (isBinaryFbx ? "Binario" : "ASCII") + " carregado: " + stem +
-            (hasAnimStack ? " [Animacoes Blender detectadas]" : ""));
+            (hasAnimStack ? " [Animacoes Blender + Rest Pose preservada]" : ""));
         return 0;
     }
     return -1;
@@ -1217,15 +1646,18 @@ static void BuildGridLines() {
     lines.push_back({ {0,0,0},         {0.25f,0.85f,0.35f,1} }); lines.push_back({ {0,4,0},        {0.25f,0.85f,0.35f,1} });
     lines.push_back({ {0,0,(float)-H}, {0.25f,0.55f,0.95f,1} }); lines.push_back({ {0,0,(float)H}, {0.25f,0.55f,0.95f,1} });
 
+#if defined(_WIN32)
     g_gridVertCount = (UINT)lines.size();
     D3D11_BUFFER_DESC bd{ (UINT)(lines.size() * sizeof(LineVertex)), D3D11_USAGE_IMMUTABLE, D3D11_BIND_VERTEX_BUFFER, 0, 0, 0 };
     D3D11_SUBRESOURCE_DATA sd{ lines.data(), 0, 0 };
     g_device->CreateBuffer(&bd, &sd, &g_gridVB);
+#endif
 }
 
 // =============================================================================
-// Direct3D 11 Device & Pipeline
+// RHI Device & Pipeline (DirectX 11 no Windows OU WebGPU no Browser)
 // =============================================================================
+#if defined(_WIN32)
 static void CreateBackRTV() {
     ID3D11Texture2D* bb = nullptr;
     g_swap->GetBuffer(0, IID_PPV_ARGS(&bb));
@@ -1389,6 +1821,61 @@ static std::string SaveFileDialog(const char* filter, const char* title, const c
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
     return GetSaveFileNameA(&ofn) ? std::string(file) : std::string();
 }
+#else
+static bool CreateDevice() {
+#if defined(__EMSCRIPTEN__)
+    g_wgpuInstance = wgpuCreateInstance(nullptr);
+    WGPUSurfaceDescriptorFromCanvasHTMLSelector canvasDesc{};
+    canvasDesc.chain.sType = WGPUSType_SurfaceDescriptorFromCanvasHTMLSelector;
+    canvasDesc.selector = "#canvas";
+    WGPUSurfaceDescriptor surfDesc{};
+    surfDesc.nextInChain = &canvasDesc.chain;
+    g_wgpuSurface = wgpuInstanceCreateSurface(g_wgpuInstance, &surfDesc);
+#endif
+    g_rhiDevice = std::make_unique<WebGPURHIDevice>();
+    g_renderGraph.InitDefault();
+    return true;
+}
+
+static void DestroyViewport() {
+#if defined(__EMSCRIPTEN__)
+    if (g_wgpuVpView)   { wgpuTextureViewRelease(g_wgpuVpView); g_wgpuVpView = nullptr; }
+    if (g_wgpuVpTex)    { wgpuTextureRelease(g_wgpuVpTex); g_wgpuVpTex = nullptr; }
+    if (g_wgpuDepthView){ wgpuTextureViewRelease(g_wgpuDepthView); g_wgpuDepthView = nullptr; }
+    if (g_wgpuDepthTex) { wgpuTextureRelease(g_wgpuDepthTex); g_wgpuDepthTex = nullptr; }
+#endif
+}
+
+static void CreateViewport(UINT w, UINT h) {
+    DestroyViewport();
+    g_vpW = w; g_vpH = h;
+#if defined(__EMSCRIPTEN__)
+    if (!g_wgpuDevice) return;
+    WGPUTextureDescriptor td{};
+    td.dimension = WGPUTextureDimension_2D;
+    td.size = { w, h, 1 };
+    td.mipLevelCount = 1;
+    td.sampleCount = 1;
+    td.format = WGPUTextureFormat_RGBA8Unorm;
+    td.usage = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_TextureBinding;
+    g_wgpuVpTex = wgpuDeviceCreateTexture(g_wgpuDevice, &td);
+    if (g_wgpuVpTex) g_wgpuVpView = wgpuTextureCreateView(g_wgpuVpTex, nullptr);
+
+    td.format = WGPUTextureFormat_Depth24Plus;
+    td.usage = WGPUTextureUsage_RenderAttachment;
+    g_wgpuDepthTex = wgpuDeviceCreateTexture(g_wgpuDevice, &td);
+    if (g_wgpuDepthTex) g_wgpuDepthView = wgpuTextureCreateView(g_wgpuDepthTex, nullptr);
+#endif
+}
+
+static bool CreatePipeline() {
+    std::snprintf(g_shaderEditorBuf, sizeof(g_shaderEditorBuf), "%s", kWebGPUShaderSrc);
+    return HotReloadMainShader();
+}
+
+static std::string OpenFileDialog(const char*, const char*) { return {}; }
+static std::string SaveFileDialog(const char*, const char*, const char*) { return {}; }
+#endif
 
 static bool SaveSceneJSON(const std::string& path) {
     try { if (fs::path(path).has_parent_path()) fs::create_directories(fs::path(path).parent_path()); } catch (...) {}
@@ -1435,9 +1922,23 @@ static Entity& AddEntity(EntityKind kind, MeshPrimitive prim, const std::string&
     } else if (kind == EntityKind::Rig3D || kind == EntityKind::Rig2D) {
         e.transform.position = { 0.0f, 0.0f, 0.0f };
         e.mesh.color         = { 0.35f, 0.72f, 0.98f, 1.0f };
+        if (g_lastLoadedSkeleton.hasCustomSkeleton) {
+            e.skeleton = g_lastLoadedSkeleton;
+            g_lastLoadedSkeleton = SkeletonComponent{};
+        }
+        e.animator.states = {
+            { "Idle",           "", "idle",            1.0f, true,  AnimatorState::Idle },
+            { "Walk",           "", "walk",            1.0f, true,  AnimatorState::Walk },
+            { "Run",            "", "run",             1.2f, true,  AnimatorState::Run },
+            { "Jump",           "", "jump",            1.0f, false, AnimatorState::Jump },
+            { "Attack",         "", "punch_combo",     1.1f, false, AnimatorState::Attack },
+            { "CapoeiraKick",   "", "capoeira_kick",   1.2f, false, AnimatorState::CapoeiraKick },
+            { "DodgeRoll",      "", "dodge_roll",      1.3f, false, AnimatorState::DodgeRoll },
+            { "ZombieShambler", "", "zombie_shambler", 1.0f, true,  AnimatorState::ZombieShambler }
+        };
         e.animator.keyframes = {
-            { 0.0f, 2, 0, -25.0f }, { 0.5f, 2, 0, 25.0f }, { 1.0f, 2, 0, -25.0f },
-            { 0.0f, 3, 0,  25.0f }, { 0.5f, 3, 0,-25.0f }, { 1.0f, 3, 0,  25.0f },
+            { 0.0f, 2, 0, -25.0f, InterpolationMode::Smooth }, { 0.5f, 2, 0, 25.0f, InterpolationMode::Smooth }, { 1.0f, 2, 0, -25.0f, InterpolationMode::Smooth },
+            { 0.0f, 3, 0,  25.0f, InterpolationMode::Smooth }, { 0.5f, 3, 0,-25.0f, InterpolationMode::Smooth }, { 1.0f, 3, 0,  25.0f, InterpolationMode::Smooth },
         };
     } else if (kind == EntityKind::Sprite2D) {
         e.transform.position = { 0.0f, 0.85f, 0.0f };
@@ -1466,30 +1967,54 @@ static void DeleteSelected() {
     g_scene.selected = -1;
 }
 
+static float SampleKeyframeInterpolation(float a, float b, float alpha, InterpolationMode mode) {
+    if (mode == InterpolationMode::Step) return a;
+    if (mode == InterpolationMode::Smooth) {
+        float u = std::clamp(alpha, 0.0f, 1.0f);
+        u = u * u * (3.0f - 2.0f * u);
+        return a + (b - a) * u;
+    }
+    return a + (b - a) * std::clamp(alpha, 0.0f, 1.0f);
+}
+
 static void EvaluateAnimatorPose(Entity& e, float dt) {
     if (!e.animator.enabled) return;
     auto& anim = e.animator;
     anim.stateTime += dt;
 
-    // Maquina de Estados (Idle -> Walk -> Run -> Jump -> Attack)
+    // Maquina de Estados (suporta estados padrao e estados customizados)
     if (anim.triggerAttack) {
-        anim.currentState  = AnimatorState::Attack;
-        anim.stateTime     = 0.0f;
-        anim.triggerAttack = false;
+        anim.currentState    = AnimatorState::Attack;
+        anim.activeStateName = "Attack";
+        anim.stateTime       = 0.0f;
+        anim.triggerAttack   = false;
     } else if (!anim.paramGrounded) {
-        anim.currentState = AnimatorState::Jump;
-    } else if (anim.currentState == AnimatorState::Attack && anim.stateTime >= 0.7f) {
-        anim.currentState = (anim.paramSpeed > 0.1f) ? AnimatorState::Walk : AnimatorState::Idle;
-        anim.stateTime    = 0.0f;
-    } else if (anim.currentState != AnimatorState::Attack) {
+        anim.currentState    = AnimatorState::Jump;
+        anim.activeStateName = "Jump";
+    } else if ((anim.currentState == AnimatorState::Attack ||
+                anim.currentState == AnimatorState::CapoeiraKick ||
+                anim.currentState == AnimatorState::DodgeRoll) && anim.stateTime >= 0.7f) {
+        anim.currentState    = (anim.paramSpeed > 0.1f) ? AnimatorState::Walk : AnimatorState::Idle;
+        anim.activeStateName = AnimatorStateName(anim.currentState);
+        anim.stateTime       = 0.0f;
+    } else if (anim.currentState != AnimatorState::Attack &&
+               anim.currentState != AnimatorState::CapoeiraKick &&
+               anim.currentState != AnimatorState::DodgeRoll &&
+               anim.currentState != AnimatorState::Custom) {
         if (anim.paramSpeed > 3.5f)      anim.currentState = AnimatorState::Run;
         else if (anim.paramSpeed > 0.1f) anim.currentState = AnimatorState::Walk;
         else                             anim.currentState = AnimatorState::Idle;
+        anim.activeStateName = AnimatorStateName(anim.currentState);
     }
 
     if (anim.useKeyframes && !anim.keyframes.empty()) {
         float t = std::fmod(anim.stateTime, std::max(0.2f, anim.clipDuration));
-        for (int b = 0; b < 6; ++b) {
+        if (e.skeleton.hasCustomSkeleton) e.skeleton.ResetToRestPose();
+        int maxBones = e.skeleton.hasCustomSkeleton
+            ? std::min((int)e.skeleton.bones.size(), kMaxSkeletonBones)
+            : 6;
+
+        for (int b = 0; b < maxBones; ++b) {
             for (int ax = 0; ax < 3; ++ax) {
                 const AnimationKeyframe* prevK = nullptr;
                 const AnimationKeyframe* nextK = nullptr;
@@ -1498,19 +2023,32 @@ static void EvaluateAnimatorPose(Entity& e, float dt) {
                     if (k.time <= t && (!prevK || k.time > prevK->time)) prevK = &k;
                     if (k.time >= t && (!nextK || k.time < nextK->time)) nextK = &k;
                 }
+                if (!prevK && !nextK) continue;
+
                 float val = 0.0f;
                 if (prevK && nextK && prevK != nextK) {
                     float alpha = (t - prevK->time) / std::max(0.001f, nextK->time - prevK->time);
-                    val = prevK->angleDeg + (nextK->angleDeg - prevK->angleDeg) * alpha;
-                } else if (prevK) val = prevK->angleDeg;
-                else if (nextK) val = nextK->angleDeg;
+                    val = SampleKeyframeInterpolation(prevK->angleDeg, nextK->angleDeg, alpha, prevK->interpolation);
+                } else if (prevK) {
+                    val = prevK->angleDeg;
+                } else {
+                    val = nextK->angleDeg;
+                }
 
-                XMFLOAT3* targetBone = (b == 0) ? &e.rigPose.spine : (b == 1) ? &e.rigPose.head :
-                                       (b == 2) ? &e.rigPose.armL  : (b == 3) ? &e.rigPose.armR :
-                                       (b == 4) ? &e.rigPose.legL  : &e.rigPose.legR;
-                if (ax == 0) targetBone->x = val;
-                else if (ax == 1) targetBone->y = val;
-                else targetBone->z = val;
+                if (e.skeleton.hasCustomSkeleton && b < (int)e.skeleton.bones.size()) {
+                    BoneTransform& bt = e.skeleton.bones[b];
+                    if (ax == 0) bt.localRotDeg.x = bt.restRotDeg.x + val;
+                    else if (ax == 1) bt.localRotDeg.y = bt.restRotDeg.y + val;
+                    else bt.localRotDeg.z = bt.restRotDeg.z + val;
+                }
+                if (b < 6) {
+                    XMFLOAT3* targetBone = (b == 0) ? &e.rigPose.spine : (b == 1) ? &e.rigPose.head :
+                                           (b == 2) ? &e.rigPose.armL  : (b == 3) ? &e.rigPose.armR :
+                                           (b == 4) ? &e.rigPose.legL  : &e.rigPose.legR;
+                    if (ax == 0) targetBone->x = val;
+                    else if (ax == 1) targetBone->y = val;
+                    else targetBone->z = val;
+                }
             }
         }
         return;
@@ -1560,6 +2098,49 @@ static void EvaluateAnimatorPose(Entity& e, float dt) {
         e.rigPose.armL  = { p * 25.0f, 0, 20.0f };
         break;
     }
+    case AnimatorState::CapoeiraKick: {
+        float p = std::sin(std::min(1.0f, t / 0.7f) * XM_PI);
+        e.rigPose.spine = { -p * 24.0f, p * 60.0f, -p * 22.0f };
+        e.rigPose.legR  = { -p * 110.0f, p * 35.0f, 20.0f };
+        e.rigPose.legL  = { p * 18.0f, 0, -10.0f };
+        e.rigPose.armL  = { -40.0f * p, 0, 45.0f };
+        e.rigPose.armR  = { 30.0f * p, 0, -40.0f };
+        break;
+    }
+    case AnimatorState::DodgeRoll: {
+        float p = std::min(1.0f, t / 0.7f);
+        e.rigPose.spine = { p * 360.0f, 0, 0 };
+        e.rigPose.armL  = { -60.0f, 0, 15.0f };
+        e.rigPose.armR  = { -60.0f, 0, -15.0f };
+        e.rigPose.legL  = { 45.0f, 0, 0 };
+        e.rigPose.legR  = { 45.0f, 0, 0 };
+        break;
+    }
+    case AnimatorState::HitReact: {
+        float p = std::sin(std::min(1.0f, t / 0.45f) * XM_PI);
+        e.rigPose.spine = { -p * 28.0f, 0, 0 };
+        e.rigPose.head  = { -p * 20.0f, 0, 0 };
+        e.rigPose.armL  = { -20.0f, 0, 35.0f * p };
+        e.rigPose.armR  = { -20.0f, 0, -35.0f * p };
+        break;
+    }
+    case AnimatorState::ZombieShambler: {
+        float z = t * 4.2f;
+        e.rigPose.spine = { 16.0f + std::sin(z * 0.5f) * 5.0f, std::sin(z) * 10.0f, std::cos(z) * 6.0f };
+        e.rigPose.head  = { 12.0f, std::sin(z * 0.7f) * 14.0f, 10.0f };
+        e.rigPose.armL  = { -78.0f + std::sin(z) * 14.0f, 0, 10.0f };
+        e.rigPose.armR  = { -82.0f - std::sin(z) * 14.0f, 0, -10.0f };
+        e.rigPose.legL  = { -std::sin(z) * 28.0f, 0, 0 };
+        e.rigPose.legR  = {  std::sin(z) * 28.0f, 0, 0 };
+        break;
+    }
+    case AnimatorState::Custom: {
+        float p = std::sin(t * 4.0f);
+        e.rigPose.spine = { p * 12.0f, p * 15.0f, 0 };
+        e.rigPose.armL  = { -p * 45.0f, 0, 18.0f };
+        e.rigPose.armR  = {  p * 45.0f, 0, -18.0f };
+        break;
+    }
     }
 }
 
@@ -1578,20 +2159,34 @@ static void StopPlayMode() {
     g_isPaused  = false;
 }
 
+static bool IsPlatformKeyDown(int key) {
+#if defined(_WIN32)
+    return (GetAsyncKeyState(key) & 0x8000) != 0;
+#elif defined(__EMSCRIPTEN__)
+    if (!g_glfwWindow) return false;
+    int glfwK = (key == ' ') ? GLFW_KEY_SPACE : key;
+    return glfwGetKey(g_glfwWindow, glfwK) == GLFW_PRESS;
+#else
+    (void)key;
+    return false;
+#endif
+}
+
 static void StepSimulation(float dt) {
     if (!g_isPlaying || g_isPaused) return;
     g_playTime += dt;
     g_simFrameIndex++;
 
     g_nativeInput.keyboardActive =
-        (GetAsyncKeyState('W') & 0x8000) || (GetAsyncKeyState('A') & 0x8000) ||
-        (GetAsyncKeyState('S') & 0x8000) || (GetAsyncKeyState('D') & 0x8000) ||
-        (GetAsyncKeyState(VK_SPACE) & 0x8000);
+        IsPlatformKeyDown('W') || IsPlatformKeyDown('A') ||
+        IsPlatformKeyDown('S') || IsPlatformKeyDown('D') ||
+        IsPlatformKeyDown(' ');
 
-    // Polling nativo Microsoft XInput (controle Xbox / Windows)
+    // Polling nativo Microsoft XInput (Windows) ou Gamepad API no Browser
     XMFLOAT2 padMove{ 0.0f, 0.0f };
     bool padAttack = false;
     bool padJump   = false;
+#if defined(_WIN32)
     if (g_nativeInput.gamepadEnabled && g_pfnXInputState) {
         KodaXInputState xs{};
         if (g_pfnXInputState(0, &xs) == ERROR_SUCCESS) {
@@ -1601,23 +2196,28 @@ static void StepSimulation(float dt) {
             };
             padMove.x = normAxis(xs.Gamepad.sThumbLX);
             padMove.y = normAxis(xs.Gamepad.sThumbLY);
-            padJump   = (xs.Gamepad.wButtons & 0x1000) != 0; // XINPUT_GAMEPAD_A
+            padJump   = (xs.Gamepad.wButtons & 0x1000) != 0;
             padAttack = (xs.Gamepad.wButtons & 0x4000) != 0 || xs.Gamepad.bRightTrigger > 80;
         }
     }
+#endif
 
-    // Coleta leve de alvos jogadores e grade espacial O(1) para separacao de mobs (snapshot imutavel para threads)
-    struct SimplePos { float x; float z; uint32_t idx; };
+    // Grade Espacial O(1) Flat Zero-Alloc (sem alocacoes de heap por frame)
+    struct SimplePos { float x; float z; uint32_t idx; int next; };
+    static constexpr uint32_t kGridBuckets = 256;
+    static std::array<int, kGridBuckets> s_gridHeads;
     static std::vector<SimplePos> s_players;
-    static std::unordered_map<int64_t, std::vector<SimplePos>> s_mobGrid;
+    static std::vector<SimplePos> s_mobNodes;
     s_players.clear();
-    s_mobGrid.clear();
+    s_mobNodes.clear();
+    s_gridHeads.fill(-1);
 
     const float cellSize = 3.0f;
-    auto cellKey = [cellSize](float x, float z) -> int64_t {
+    auto cellBucket = [cellSize](float x, float z) -> uint32_t {
         int32_t cx = (int32_t)std::floor(x / cellSize);
         int32_t cz = (int32_t)std::floor(z / cellSize);
-        return (static_cast<int64_t>(cx) << 32) | static_cast<uint32_t>(cz);
+        uint32_t h = static_cast<uint32_t>(cx * 73856093) ^ static_cast<uint32_t>(cz * 19349663);
+        return h & (kGridBuckets - 1);
     };
 
     for (uint32_t i = 0; i < (uint32_t)g_scene.entities.size(); ++i) {
@@ -1625,10 +2225,12 @@ static void StepSimulation(float dt) {
         if (!e.active) continue;
         if (e.kind == EntityKind::Rig3D || e.kind == EntityKind::Rig2D) {
             if (e.name.find("Player") != std::string::npos || e.name.find("Personagem") != std::string::npos) {
-                s_players.push_back({ e.transform.position.x, e.transform.position.z, i });
+                s_players.push_back({ e.transform.position.x, e.transform.position.z, i, -1 });
             } else if (e.health.enabled) {
-                s_mobGrid[cellKey(e.transform.position.x, e.transform.position.z)].push_back(
-                    { e.transform.position.x, e.transform.position.z, i });
+                uint32_t b = cellBucket(e.transform.position.x, e.transform.position.z);
+                int nodeIdx = (int)s_mobNodes.size();
+                s_mobNodes.push_back({ e.transform.position.x, e.transform.position.z, i, s_gridHeads[b] });
+                s_gridHeads[b] = nodeIdx;
             }
         }
     }
@@ -1643,15 +2245,14 @@ static void StepSimulation(float dt) {
         if (e.health.enabled && e.health.cooldownTimer > 0.0f)
             e.health.cooldownTimer = std::max(0.0f, e.health.cooldownTimer - dt);
 
-        // Controle do jogador local via teclado + XInput
         bool isLocalPlayer = (e.name.find("Player") != std::string::npos || e.name.find("Personagem") != std::string::npos);
         if (isLocalPlayer && (e.kind == EntityKind::Rig3D || e.kind == EntityKind::Rig2D)) {
             float mx = padMove.x;
             float mz = padMove.y;
-            if (GetAsyncKeyState('A') & 0x8000) mx -= 1.0f;
-            if (GetAsyncKeyState('D') & 0x8000) mx += 1.0f;
-            if (GetAsyncKeyState('W') & 0x8000) mz += 1.0f;
-            if (GetAsyncKeyState('S') & 0x8000) mz -= 1.0f;
+            if (IsPlatformKeyDown('A')) mx -= 1.0f;
+            if (IsPlatformKeyDown('D')) mx += 1.0f;
+            if (IsPlatformKeyDown('W')) mz += 1.0f;
+            if (IsPlatformKeyDown('S')) mz -= 1.0f;
             float mag = std::sqrt(mx * mx + mz * mz);
             if (mag > 0.05f) {
                 float inv = 1.0f / std::max(1.0f, mag);
@@ -1662,15 +2263,14 @@ static void StepSimulation(float dt) {
             } else {
                 e.animator.paramSpeed = 0.0f;
             }
-            if ((padJump || (GetAsyncKeyState(VK_SPACE) & 0x8000)) && e.animator.paramGrounded) {
+            if ((padJump || IsPlatformKeyDown(' ')) && e.animator.paramGrounded) {
                 e.physics.velocity.y = 6.5f;
                 e.animator.paramGrounded = false;
             }
-            if (padAttack || (GetAsyncKeyState('J') & 0x8000)) {
+            if (padAttack || IsPlatformKeyDown('J')) {
                 e.animator.triggerAttack = true;
             }
         } else if (e.health.enabled && !s_players.empty()) {
-            // IA de Mob escalonada com Spatial Hash O(1) para separacao sem travamentos
             float nearestDistSq = 1e9f;
             XMFLOAT2 nearestDelta{ 0.0f, 0.0f };
             for (const auto& pl : s_players) {
@@ -1688,20 +2288,19 @@ static void StepSimulation(float dt) {
                 float sepX = 0.0f, sepZ = 0.0f;
 
                 if (((e.id + g_simFrameIndex) % aiStride) == 0 && nearestDistSq < 400.0f) {
-                    auto it = s_mobGrid.find(cellKey(e.transform.position.x, e.transform.position.z));
-                    if (it != s_mobGrid.end()) {
-                        int checks = 0;
-                        for (const auto& other : it->second) {
-                            if (other.idx == (uint32_t)idx) continue;
-                            float ox = e.transform.position.x - other.x;
-                            float oz = e.transform.position.z - other.z;
-                            float od2 = ox * ox + oz * oz;
-                            if (od2 > 0.001f && od2 < 1.3f) {
-                                float od = std::sqrt(od2);
-                                sepX += (ox / od) * 1.4f;
-                                sepZ += (oz / od) * 1.4f;
-                                if (++checks >= 4) break;
-                            }
+                    uint32_t b = cellBucket(e.transform.position.x, e.transform.position.z);
+                    int checks = 0;
+                    for (int cur = s_gridHeads[b]; cur >= 0; cur = s_mobNodes[cur].next) {
+                        const auto& other = s_mobNodes[cur];
+                        if (other.idx == (uint32_t)idx) continue;
+                        float ox = e.transform.position.x - other.x;
+                        float oz = e.transform.position.z - other.z;
+                        float od2 = ox * ox + oz * oz;
+                        if (od2 > 0.001f && od2 < 1.3f) {
+                            float od = std::sqrt(od2);
+                            sepX += (ox / od) * 1.4f;
+                            sepZ += (oz / od) * 1.4f;
+                            if (++checks >= 4) break;
                         }
                     }
                 }
@@ -1808,6 +2407,15 @@ static void DrawMeshWithMatrix(int meshIdx, int texIdx, const XMMATRIX& world, c
     const MeshAsset& ma = g_meshes[meshIdx];
     int safeTex = (texIdx >= 0 && texIdx < (int)g_textures.size()) ? texIdx : 0;
 
+    CBData cb{};
+    XMStoreFloat4x4(&cb.wvp,   XMMatrixTranspose(world * viewProj));
+    XMStoreFloat4x4(&cb.world, XMMatrixTranspose(world));
+    cb.color     = color;
+    cb.cameraPos = { eyePos.x, eyePos.y, eyePos.z, roughness };
+    cb.lightDir  = { g_lightDir.x, g_lightDir.y, g_lightDir.z, g_ambientIntensity };
+    cb.material  = { metallic, selected ? 1.0f : 0.0f, uvTiling.x, uvTiling.y };
+
+#if defined(_WIN32)
     if (g_cachedMeshIdx != meshIdx) {
         UINT stride = sizeof(Vertex), offset = 0;
         g_ctx->IASetVertexBuffers(0, 1, &ma.vb, &stride, &offset);
@@ -1824,20 +2432,18 @@ static void DrawMeshWithMatrix(int meshIdx, int texIdx, const XMMATRIX& world, c
         g_cachedWireState = wantWire;
     }
 
-    CBData cb{};
-    XMStoreFloat4x4(&cb.wvp,   XMMatrixTranspose(world * viewProj));
-    XMStoreFloat4x4(&cb.world, XMMatrixTranspose(world));
-    cb.color     = color;
-    cb.cameraPos = { eyePos.x, eyePos.y, eyePos.z, roughness };
-    cb.lightDir  = { g_lightDir.x, g_lightDir.y, g_lightDir.z, g_ambientIntensity };
-    cb.material  = { metallic, selected ? 1.0f : 0.0f, uvTiling.x, uvTiling.y };
-
     D3D11_MAPPED_SUBRESOURCE ms{};
     g_ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms);
     std::memcpy(ms.pData, &cb, sizeof(cb));
     g_ctx->Unmap(g_cb, 0);
 
     g_ctx->DrawIndexed(ma.indexCount, 0, 0);
+#elif defined(__EMSCRIPTEN__)
+    (void)wireframe;
+    if (g_wgpuQueue && g_wgpuUniformBuf) {
+        wgpuQueueWriteBuffer(g_wgpuQueue, g_wgpuUniformBuf, 0, &cb, sizeof(cb));
+    }
+#endif
     g_lastDrawCalls++;
     g_lastTriangles += ma.indexCount / 3;
 }
@@ -1855,22 +2461,18 @@ static void DrawRigHierarchy(const Entity& e, const XMMATRIX& rootWorld, const X
     int cubeIdx   = 0;
     int sphereIdx = (int)g_meshes.size() > 1 ? 1 : 0;
 
-    // Pelvis / Hips (centro a y = 0.85)
     XMMATRIX hips = XMMatrixTranslation(0.0f, 0.85f, 0.0f) * rootWorld;
     DrawMeshWithMatrix(cubeIdx, e.mesh.textureIndex, XMMatrixScaling(0.45f, 0.22f, zDepth) * hips,
                        viewProj, eyePos, e.mesh.color, e.mesh.uvTiling, e.mesh.metallic, e.mesh.roughness, e.mesh.wireframe, selected);
 
-    // Spine
     XMMATRIX spinePivot = RotDeg(e.rigPose.spine) * XMMatrixTranslation(0.0f, 0.12f, 0.0f) * hips;
     DrawMeshWithMatrix(cubeIdx, e.mesh.textureIndex, XMMatrixScaling(0.50f, 0.56f, zDepth * 1.1f) * XMMatrixTranslation(0, 0.30f, 0) * spinePivot,
                        viewProj, eyePos, e.mesh.color, e.mesh.uvTiling, e.mesh.metallic, e.mesh.roughness, e.mesh.wireframe, selected);
 
-    // Head
     XMMATRIX headPivot = RotDeg(e.rigPose.head) * XMMatrixTranslation(0.0f, 0.62f, 0.0f) * spinePivot;
     DrawMeshWithMatrix(sphereIdx, e.mesh.textureIndex, XMMatrixScaling(0.38f, 0.38f, is2D ? 0.18f : 0.38f) * XMMatrixTranslation(0, 0.22f, 0) * headPivot,
                        viewProj, eyePos, {0.95f, 0.85f, 0.75f, 1.0f}, e.mesh.uvTiling, 0.05f, 0.5f, e.mesh.wireframe, selected);
 
-    // Braco Esquerdo e Direito
     XMMATRIX armLPivot = RotDeg(e.rigPose.armL) * XMMatrixTranslation(-0.36f, 0.52f, 0.0f) * spinePivot;
     DrawMeshWithMatrix(cubeIdx, e.mesh.textureIndex, XMMatrixScaling(0.18f, 0.58f, is2D ? 0.12f : 0.18f) * XMMatrixTranslation(0, -0.26f, 0) * armLPivot,
                        viewProj, eyePos, {0.88f, 0.42f, 0.32f, 1.0f}, {1,1}, 0.1f, 0.5f, e.mesh.wireframe, selected);
@@ -1879,7 +2481,6 @@ static void DrawRigHierarchy(const Entity& e, const XMMATRIX& rootWorld, const X
     DrawMeshWithMatrix(cubeIdx, e.mesh.textureIndex, XMMatrixScaling(0.18f, 0.58f, is2D ? 0.12f : 0.18f) * XMMatrixTranslation(0, -0.26f, 0) * armRPivot,
                        viewProj, eyePos, {0.88f, 0.42f, 0.32f, 1.0f}, {1,1}, 0.1f, 0.5f, e.mesh.wireframe, selected);
 
-    // Perna Esquerda e Direita
     XMMATRIX legLPivot = RotDeg(e.rigPose.legL) * XMMatrixTranslation(-0.15f, -0.05f, 0.0f) * hips;
     DrawMeshWithMatrix(cubeIdx, e.mesh.textureIndex, XMMatrixScaling(0.20f, 0.76f, is2D ? 0.12f : 0.20f) * XMMatrixTranslation(0, -0.38f, 0) * legLPivot,
                        viewProj, eyePos, {0.22f, 0.30f, 0.45f, 1.0f}, {1,1}, 0.1f, 0.6f, e.mesh.wireframe, selected);
@@ -1890,10 +2491,9 @@ static void DrawRigHierarchy(const Entity& e, const XMMATRIX& rootWorld, const X
 }
 
 static void RenderViewport() {
-    LARGE_INTEGER freq, t0, t1, t2;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&t0);
+    auto t0 = std::chrono::high_resolution_clock::now();
 
+#if defined(_WIN32)
     ID3D11ShaderResourceView* nullSRV[1] = { nullptr };
     g_ctx->PSSetShaderResources(0, 1, nullSRV);
     g_ctx->OMSetRenderTargets(1, &g_vpRTV, g_vpDSV);
@@ -1905,15 +2505,6 @@ static void RenderViewport() {
     g_ctx->ClearRenderTargetView(g_vpRTV, clear);
     g_ctx->ClearDepthStencilView(g_vpDSV, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
 
-    XMFLOAT3 eyePos{};
-    XMMATRIX viewProj = GetCameraViewProj(&eyePos);
-
-    g_lastDrawCalls = 0;
-    g_lastTriangles = 0;
-    g_cachedMeshIdx = -1;
-    g_cachedTexIdx = -1;
-    g_cachedWireState = -1;
-
     g_ctx->IASetInputLayout(g_layout);
     g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     g_ctx->VSSetShader(g_vs, nullptr, 0);
@@ -1922,6 +2513,16 @@ static void RenderViewport() {
     g_ctx->PSSetConstantBuffers(0, 1, &g_cb);
     g_ctx->PSSetSamplers(0, 1, &g_sampler);
     g_ctx->OMSetDepthStencilState(g_dss, 0);
+#endif
+
+    XMFLOAT3 eyePos{};
+    XMMATRIX viewProj = GetCameraViewProj(&eyePos);
+
+    g_lastDrawCalls = 0;
+    g_lastTriangles = 0;
+    g_cachedMeshIdx = -1;
+    g_cachedTexIdx = -1;
+    g_cachedWireState = -1;
 
     for (int i = 0; i < (int)g_scene.entities.size(); ++i) {
         const Entity& e = g_scene.entities[i];
@@ -1941,8 +2542,9 @@ static void RenderViewport() {
         }
     }
 
-    QueryPerformanceCounter(&t1);
+    auto t1 = std::chrono::high_resolution_clock::now();
 
+#if defined(_WIN32)
     if (g_showGrid && g_gridVB && g_gridVertCount > 0) {
         UINT lstride = sizeof(LineVertex), loffset = 0;
         g_ctx->IASetVertexBuffers(0, 1, &g_gridVB, &lstride, &loffset);
@@ -1962,11 +2564,12 @@ static void RenderViewport() {
         g_ctx->Draw(g_gridVertCount, 0);
         g_lastDrawCalls++;
     }
+#endif
 
-    QueryPerformanceCounter(&t2);
+    auto t2 = std::chrono::high_resolution_clock::now();
     if (g_renderGraph.passes.size() >= 4) {
-        g_renderGraph.passes[2].lastTimeMs = (float)(t1.QuadPart - t0.QuadPart) * 1000.0f / (float)freq.QuadPart;
-        g_renderGraph.passes[3].lastTimeMs = (float)(t2.QuadPart - t1.QuadPart) * 1000.0f / (float)freq.QuadPart;
+        g_renderGraph.passes[2].lastTimeMs = std::chrono::duration<float, std::milli>(t1 - t0).count();
+        g_renderGraph.passes[3].lastTimeMs = std::chrono::duration<float, std::milli>(t2 - t1).count();
     }
 }
 
@@ -2037,7 +2640,9 @@ static void DrawMenuBar() {
             if (ImGui::Button("Stop")) StopPlayMode();
         }
         ImGui::SameLine();
-        ImGui::TextDisabled("| Win32 DX11 (%uT) | %.1f FPS | Draws: %u | Tris: %u",
+        ImGui::TextDisabled("| %s | %s (%uT) | %.1f FPS | Draws: %u | Tris: %u",
+                            g_envProfile.osLabel,
+                            RHIBackendName(ResolveActiveRHIBackend(g_selectedBackend)),
                             g_winRuntime.logicalCores,
                             (g_lastFrameMs > 0.01f ? 1000.0f / g_lastFrameMs : 0.0f), g_lastDrawCalls, g_lastTriangles);
         ImGui::EndMainMenuBar();
@@ -2191,7 +2796,11 @@ static void DrawCenterViewport(ImVec2 pos, ImVec2 size) {
     ImVec2 avail = ImGui::GetContentRegionAvail();
     g_wantVpW = std::max(1u, (UINT)avail.x);
     g_wantVpH = std::max(1u, (UINT)avail.y);
+#if defined(_WIN32)
     ImGui::Image((ImTextureID)(intptr_t)g_vpSRV, avail);
+#elif defined(__EMSCRIPTEN__)
+    ImGui::Image((ImTextureID)(intptr_t)g_wgpuVpView, avail);
+#endif
 
     if (ImGui::IsWindowHovered()) {
         ImGuiIO& io = ImGui::GetIO();
@@ -2380,8 +2989,43 @@ static void DrawBottomDock(ImVec2 pos, ImVec2 size) {
         }
 
         if (ImGui::BeginTabItem("Animator States")) {
-            ImGui::Text("Transicoes da Maquina de Estados:");
+            if (g_scene.selected >= 0 && g_scene.selected < (int)g_scene.entities.size()) {
+                Entity& sel = g_scene.entities[g_scene.selected];
+                static char newStateName[48] = "ComboEspecial";
+                static int  presetIdx = 0;
+                const char* presets[] = { "idle", "walk", "run", "jump", "punch_combo", "capoeira_kick", "dodge_roll", "hit_react", "zombie_shambler" };
+                ImGui::SetNextItemWidth(130.0f);
+                ImGui::InputTextWithHint("##newst", "Novo estado...", newStateName, sizeof(newStateName));
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(130.0f);
+                ImGui::Combo("##preset", &presetIdx, presets, 9);
+                ImGui::SameLine();
+                if (ImGui::Button("+ Criar Estado")) {
+                    AnimatorStateDef st;
+                    st.name = (newStateName[0] != '\0') ? newStateName : ("Estado_" + std::to_string(sel.animator.states.size() + 1));
+                    st.presetId = presets[presetIdx];
+                    st.baseKind = (presetIdx == 5) ? AnimatorState::CapoeiraKick
+                                : (presetIdx == 6) ? AnimatorState::DodgeRoll
+                                : (presetIdx == 7) ? AnimatorState::HitReact
+                                : (presetIdx == 8) ? AnimatorState::ZombieShambler
+                                : AnimatorState::Custom;
+                    sel.animator.states.push_back(st);
+                    sel.animator.currentState = st.baseKind;
+                    sel.animator.activeStateName = st.name;
+                    Log("Estado Animator criado: " + st.name);
+                }
+                ImGui::Separator();
+                for (size_t si = 0; si < sel.animator.states.size(); ++si) {
+                    const auto& st = sel.animator.states[si];
+                    if (ImGui::Selectable((st.name + " [" + st.presetId + "]").c_str(), sel.animator.activeStateName == st.name)) {
+                        sel.animator.currentState = st.baseKind;
+                        sel.animator.activeStateName = st.name;
+                        sel.animator.stateTime = 0.0f;
+                    }
+                }
+            }
             ImGui::Separator();
+            ImGui::Text("Transicoes da Maquina de Estados:");
             for (const auto& tr : g_defaultTransitions) {
                 ImGui::Text("%s  -->  %s   [condicao: %s | blend: %.2fs]",
                             AnimatorStateName(tr.from), AnimatorStateName(tr.to), tr.condition.c_str(), tr.blendDuration);
@@ -2446,7 +3090,7 @@ static void DrawBottomDock(ImVec2 pos, ImVec2 size) {
             ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("Shader HLSL")) {
+        if (ImGui::BeginTabItem("Shader (HLSL / WGSL)")) {
             if (ImGui::Button("Compilar & Hot-Reload")) HotReloadMainShader();
             ImGui::SameLine();
             ImGui::TextColored(g_shaderHasError ? ImVec4(0.95f,0.35f,0.35f,1) : ImVec4(0.35f,0.85f,0.50f,1),
@@ -2456,11 +3100,12 @@ static void DrawBottomDock(ImVec2 pos, ImVec2 size) {
         }
 
         if (ImGui::BeginTabItem("RDG & Profiler")) {
-            ImGui::Text("Plataforma: Windows Nativo (%u Threads Win32) | GPU: %s (%u MB)",
+            ImGui::Text("Ambiente Detectado: %s | RHI: %s (%u Threads) | GPU: %s (%u MB)",
+                        g_envProfile.osLabel, g_envProfile.rhiLabel,
                         g_winRuntime.logicalCores, g_winRuntime.gpuName.c_str(), g_winRuntime.vramMB);
-            ImGui::TextDisabled("Flip-Model DXGI: %s | XInput Nativo: %s | DX11 State Cache: Ativo",
+            ImGui::TextDisabled("Flip-Model / WebGPU Swap: %s | XInput Nativo: %s | Spatial-Hash AI: Zero-Alloc O(1)",
                                 g_winRuntime.flipModelActive ? "Ativo" : "Discard",
-                                g_winRuntime.xinputReady ? "Ativo" : "Indisponivel");
+                                g_winRuntime.xinputReady ? "Ativo" : "Browser/Indisponivel");
             ImGui::PlotLines("Frame (ms)", g_frameTimeHistory.data(), (int)g_frameTimeHistory.size(),
                              g_frameHistoryIdx, nullptr, 0.0f, 33.3f, ImVec2(0, 44));
             for (auto& p : g_renderGraph.passes)
@@ -2486,13 +3131,14 @@ static void DrawBottomDock(ImVec2 pos, ImVec2 size) {
             ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("Build & Export (.EXE / Linux / APK)")) {
-            static char s_appName[64]    = "MeuJogoKoda";
-            static char s_pkgId[96]      = "com.koda.gamedev.app";
+        if (ImGui::BeginTabItem("Build & Export (.EXE / WebGPU / Linux / APK)")) {
+            static char s_appName[64]     = "MeuJogoKoda";
+            static char s_pkgId[96]       = "com.koda.gamedev.app";
             static char s_studioPath[260] = "C:\\Program Files\\Android\\Android Studio\\bin\\studio64.exe";
-            static int  s_targetIdx      = 0; // 0=Windows .exe, 1=Linux AppImage, 2=Android Studio APK
+            static int  s_targetIdx       = 0;
             static std::vector<std::string> s_buildOut;
 
+#if defined(_WIN32)
             auto runCmdPipe = [](const std::string& cmd) -> int {
                 s_buildOut.push_back("$ " + cmd);
                 SECURITY_ATTRIBUTES sa{ sizeof(sa), nullptr, TRUE };
@@ -2572,9 +3218,10 @@ static void DrawBottomDock(ImVec2 pos, ImVec2 size) {
                 return fs::absolute(dir).string();
             };
 
-            ImGui::RadioButton("1. Windows (.exe) no Programa", &s_targetIdx, 0); ImGui::SameLine();
-            ImGui::RadioButton("2. Linux (.AppImage)", &s_targetIdx, 1); ImGui::SameLine();
-            ImGui::RadioButton("3. Android Studio (.apk)", &s_targetIdx, 2);
+            ImGui::RadioButton("1. Windows (.exe)", &s_targetIdx, 0); ImGui::SameLine();
+            ImGui::RadioButton("2. Browser (WebGPU)", &s_targetIdx, 1); ImGui::SameLine();
+            ImGui::RadioButton("3. Linux (.AppImage)", &s_targetIdx, 2); ImGui::SameLine();
+            ImGui::RadioButton("4. Android (.apk)", &s_targetIdx, 3);
 
             ImGui::SetNextItemWidth(160.0f); ImGui::InputText("Nome App", s_appName, sizeof(s_appName));
             ImGui::SameLine();
@@ -2584,7 +3231,7 @@ static void DrawBottomDock(ImVec2 pos, ImVec2 size) {
                 if (ImGui::Button("Compilar .EXE Agora (CMake/MSVC)")) {
                     s_buildOut.clear();
                     SaveSceneJSON("build-win/Assets/Main.kscene");
-                    int r1 = runCmdPipe("cmake -B build-win -G \"Visual Studio 17 2022\" -A x64 -DKODA_RHI_BACKEND=DirectX11 -DKODA_FETCH_IMGUI=ON");
+                    int r1 = runCmdPipe("cmake -B build-win -G \"Visual Studio 17 2022\" -A x64 -DKODA_RHI_BACKEND=Auto -DKODA_FETCH_IMGUI=ON");
                     if (r1 == 0) r1 = runCmdPipe("cmake --build build-win --config Release");
                     s_buildOut.push_back(r1 == 0 ? "[OK] Executavel .EXE gerado em build-win/bin/Release/" : "[Aviso] Verifique Visual Studio/CMake no PATH.");
                 }
@@ -2593,6 +3240,13 @@ static void DrawBottomDock(ImVec2 pos, ImVec2 size) {
                     ShellExecuteA(g_hwnd, "open", "build-win\\bin\\Release\\KodaGameDev.exe", nullptr, nullptr, SW_SHOWNORMAL);
                 }
             } else if (s_targetIdx == 1) {
+                if (ImGui::Button("Compilar Navegador WebGPU (Emscripten)")) {
+                    s_buildOut.clear();
+                    SaveSceneJSON("build-web/Assets/Main.kscene");
+                    int r = runCmdPipe("emcmake cmake -B build-web -DKODA_RHI_BACKEND=WebGPU -DKODA_FETCH_IMGUI=ON && cmake --build build-web -j");
+                    s_buildOut.push_back(r == 0 ? "[OK] Bundle WebGPU gerado em build-web/web/KodaGameDev.html" : "[Aviso] Ative o Emscripten SDK (emsdk_env) no terminal.");
+                }
+            } else if (s_targetIdx == 2) {
                 if (ImGui::Button("Compilar App Linux (.AppImage / WSL)")) {
                     s_buildOut.clear();
                     SaveSceneJSON("build-linux/Assets/Main.kscene");
@@ -2622,6 +3276,9 @@ static void DrawBottomDock(ImVec2 pos, ImVec2 size) {
                     s_buildOut.push_back(r == 0 ? "[OK] APK gerado em app/build/outputs/apk/release/" : "[Aviso] Abra no Android Studio ou execute gradlew assembleRelease.");
                 }
             }
+#else
+            ImGui::Text("Executando no Navegador (%s). Use a compilacao desktop no Windows para gerar .EXE/.APK.", g_envProfile.rhiLabel);
+#endif
 
             ImGui::BeginChild("build_log_child", ImVec2(-1, -1), true);
             for (const auto& line : s_buildOut) ImGui::TextUnformatted(line.c_str());
@@ -2646,8 +3303,28 @@ static void DrawUI() {
     DrawBottomDock    ({ 0.0f,      H - bottomH },    { W - rightW,         bottomH });
 }
 
+static void InitDefaultScene() {
+    BuildProceduralTextures();
+    BuildCubeMesh();
+    BuildSphereMesh();
+    BuildPlaneMesh();
+    BuildCylinderMesh();
+    BuildConeMesh();
+    BuildGridLines();
+    CreateViewport(g_vpW, g_vpH);
+
+    AddEntity(EntityKind::Mesh3D, MeshPrimitive::Plane, "Chao_Grid");
+    Entity& rig = AddEntity(EntityKind::Rig3D, MeshPrimitive::Cube, "Personagem_Rig3D");
+    rig.animator.paramSpeed = 1.5f;
+    Entity& box = AddEntity(EntityKind::Mesh3D, MeshPrimitive::Cube, "Caixa_Texturizada");
+    box.transform.position = { 2.4f, 0.5f, 0.0f };
+    box.mesh.textureIndex  = 1;
+    g_scene.selected = 1;
+}
+
+#if defined(_WIN32)
 // =============================================================================
-// Win32 WndProc & wWinMain
+// Win32 WndProc & wWinMain (Windows Nativo DX11)
 // =============================================================================
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
@@ -2665,7 +3342,7 @@ static bool CreateMainWindow(HINSTANCE hInst, int nCmdShow) {
     WNDCLASSEXW wc{ sizeof(wc), CS_HREDRAW | CS_VREDRAW, WndProc, 0, 0, hInst, nullptr,
                     LoadCursorW(nullptr, IDC_ARROW), nullptr, nullptr, L"KodaGameDevWindow", nullptr };
     RegisterClassExW(&wc);
-    g_hwnd = CreateWindowExW(0, wc.lpszClassName, L"Koda Game Dev v2.5 - C++17 / DirectX 11",
+    g_hwnd = CreateWindowExW(0, wc.lpszClassName, L"Koda Game Dev v2.6 - C++17 / DirectX 11",
                              WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, (int)g_width, (int)g_height,
                              nullptr, nullptr, hInst, nullptr);
     if (!g_hwnd) return false;
@@ -2684,23 +3361,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     if (!CreateDevice())                    { timeEndPeriod(1); return 2; }
     if (!CreatePipeline())                  { timeEndPeriod(1); return 3; }
 
-    BuildProceduralTextures();
-    BuildCubeMesh();
-    BuildSphereMesh();
-    BuildPlaneMesh();
-    BuildCylinderMesh();
-    BuildConeMesh();
-    BuildGridLines();
-    CreateViewport(g_vpW, g_vpH);
-
-    // Cena inicial estilo Unity/Godot
-    AddEntity(EntityKind::Mesh3D, MeshPrimitive::Plane, "Chao_Grid");
-    Entity& rig = AddEntity(EntityKind::Rig3D, MeshPrimitive::Cube, "Personagem_Rig3D");
-    rig.animator.paramSpeed = 1.5f; // inicia em Walk no Play Mode
-    Entity& box = AddEntity(EntityKind::Mesh3D, MeshPrimitive::Cube, "Caixa_Texturizada");
-    box.transform.position = { 2.4f, 0.5f, 0.0f };
-    box.mesh.textureIndex  = 1; // Checkerboard
-    g_scene.selected = 1;
+    InitDefaultScene();
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -2713,7 +3374,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     ImGui_ImplWin32_Init(g_hwnd);
     ImGui_ImplDX11_Init(g_device, g_ctx);
 
-    Log("Koda Game Dev v2.5 Nativo Windows: " + g_winRuntime.gpuName +
+    Log("Koda Game Dev v2.6 [Windows DirectX 11]: " + g_winRuntime.gpuName +
         " | Win32 ThreadPool (" + std::to_string(g_winRuntime.logicalCores) + " threads)" +
         (g_winRuntime.flipModelActive ? " | Flip-Model DXGI" : ""));
 
@@ -2781,3 +3442,72 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     CleanupBackRTV(); SafeRelease(g_swap); SafeRelease(g_ctx); SafeRelease(g_device);
     return 0;
 }
+#elif defined(__EMSCRIPTEN__)
+// =============================================================================
+// Browser WebGPU Main Loop (Emscripten Wasm + GLFW3 + WGPU)
+// =============================================================================
+static std::chrono::high_resolution_clock::time_point g_webLastTime;
+
+static void EmscriptenMainFrame() {
+    if (!g_running || !g_glfwWindow || glfwWindowShouldClose(g_glfwWindow)) {
+        emscripten_cancel_main_loop();
+        return;
+    }
+    glfwPollEvents();
+    auto now = std::chrono::high_resolution_clock::now();
+    float dt = std::clamp(std::chrono::duration<float>(now - g_webLastTime).count(), 0.0001f, 0.1f);
+    g_webLastTime = now;
+
+    g_lastFrameMs = dt * 1000.0f;
+    g_frameTimeHistory[g_frameHistoryIdx] = g_lastFrameMs;
+    g_frameHistoryIdx = (g_frameHistoryIdx + 1) % (int)g_frameTimeHistory.size();
+
+    StepSimulation(dt);
+    if (g_wantVpW != g_vpW || g_wantVpH != g_vpH) CreateViewport(g_wantVpW, g_wantVpH);
+
+    ImGui_ImplWGPU_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+    DrawUI();
+    ImGui::Render();
+
+    RenderViewport();
+}
+
+int main() {
+    InitWindowsPlatformTechnologies();
+    if (!glfwInit()) return 1;
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    g_glfwWindow = glfwCreateWindow((int)g_width, (int)g_height, "Koda Game Dev v2.6 - WebGPU", nullptr, nullptr);
+    if (!g_glfwWindow) { glfwTerminate(); return 1; }
+
+    CreateDevice();
+    CreatePipeline();
+    InitDefaultScene();
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::StyleColorsDark();
+    ImGui_ImplGlfw_InitForOther(g_glfwWindow, true);
+    ImGui_ImplWGPU_InitInfo wgpuInfo{};
+    wgpuInfo.Device = g_wgpuDevice;
+    wgpuInfo.NumFramesInFlight = 3;
+    wgpuInfo.RenderTargetFormat = WGPUTextureFormat_RGBA8Unorm;
+    wgpuInfo.DepthStencilFormat = WGPUTextureFormat_Depth24Plus;
+    ImGui_ImplWGPU_Init(&wgpuInfo);
+
+    Log("Koda Game Dev v2.6 [Browser WebGPU]: Auto-detectado __EMSCRIPTEN__ -> WGPU / WGSL ativo.");
+    g_webLastTime = std::chrono::high_resolution_clock::now();
+    emscripten_set_main_loop(EmscriptenMainFrame, 0, true);
+    return 0;
+}
+#else
+int main() {
+    InitWindowsPlatformTechnologies();
+    CreateDevice();
+    CreatePipeline();
+    InitDefaultScene();
+    Log("Koda Game Dev v2.6 [CrossPlatform] inicializado.");
+    return 0;
+}
+#endif

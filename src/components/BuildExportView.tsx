@@ -3,13 +3,14 @@ import {
   CheckCircle2,
   Download,
   ExternalLink,
+  Globe,
   Monitor,
   Play,
   Smartphone,
   Terminal,
 } from 'lucide-react';
 
-type PlatformTarget = 'windows' | 'linux' | 'android';
+type PlatformTarget = 'windows' | 'webgpu' | 'linux' | 'android';
 
 export const BuildExportView: React.FC = () => {
   const [target, setTarget] = useState<PlatformTarget>('windows');
@@ -20,16 +21,21 @@ export const BuildExportView: React.FC = () => {
   );
   const [includeDebug, setIncludeDebug] = useState(false);
   const [buildLogs, setBuildLogs] = useState<string[]>([
-    'Pronto. Selecione uma das 3 plataformas (Windows .exe, Linux .AppImage ou Android Studio .apk).',
+    'Pronto. A Engine detecta automaticamente Windows (DirectX 11) ou Navegador (WebGPU), alem de exportar Linux e Android.',
   ]);
 
   const cfg = includeDebug ? 'Debug' : 'Release';
 
   const commandMap: Record<PlatformTarget, string[]> = {
     windows: [
-      `cmake -B build-win -G "Visual Studio 17 2022" -A x64 -DKODA_RHI_BACKEND=DirectX11 -DKODA_FETCH_IMGUI=ON`,
+      `cmake -B build-win -G "Visual Studio 17 2022" -A x64 -DKODA_RHI_BACKEND=Auto -DKODA_FETCH_IMGUI=ON`,
       `cmake --build build-win --config ${cfg}`,
-      `# Saída: build-win/bin/${cfg}/${appName}.exe (disparado via CreateProcessA dentro da engine C++)`,
+      `# Auto-detecta Windows Native (.exe) -> DirectX 11 + DXGI Flip-Model + Win32 ThreadPool + XInput`,
+    ],
+    webgpu: [
+      `emcmake cmake -B build-web -DKODA_RHI_BACKEND=WebGPU -DKODA_FETCH_IMGUI=ON -DCMAKE_BUILD_TYPE=${cfg}`,
+      `cmake --build build-web -j`,
+      `# Auto-detecta Browser (__EMSCRIPTEN__) -> WebGPU (WGPU/WGSL) + GLFW3 em build-web/web/KodaGameDev.html`,
     ],
     linux: [
       `cmake -B build-linux -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-linux.cmake -DKODA_RHI_BACKEND=Vulkan -DCMAKE_BUILD_TYPE=${cfg}`,
@@ -62,8 +68,8 @@ export const BuildExportView: React.FC = () => {
   const handleDownloadTargetScript = () => {
     if (target === 'windows') {
       const bat = `@echo off
-echo === Koda Game Dev - Compilar .EXE Nativo (${cfg}) ===
-cmake -B build-win -G "Visual Studio 17 2022" -A x64 -DKODA_RHI_BACKEND=DirectX11 -DKODA_FETCH_IMGUI=ON
+echo === Koda Game Dev - Compilar .EXE Nativo Windows DirectX 11 (${cfg}) ===
+cmake -B build-win -G "Visual Studio 17 2022" -A x64 -DKODA_RHI_BACKEND=Auto -DKODA_FETCH_IMGUI=ON
 if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
 cmake --build build-win --config ${cfg}
 echo Executavel gerado em build-win\\bin\\${cfg}\\
@@ -71,6 +77,16 @@ pause
 `;
       downloadText(bat, `compilar_${appName}_windows.bat`);
       setBuildLogs((p) => [...p, `Script Windows gerado: compilar_${appName}_windows.bat`]);
+    } else if (target === 'webgpu') {
+      const sh = `#!/usr/bin/env bash
+set -e
+echo "=== Koda Game Dev - Compilar Navegador WebGPU (Emscripten ${cfg}) ==="
+emcmake cmake -B build-web -DKODA_RHI_BACKEND=WebGPU -DKODA_FETCH_IMGUI=ON -DCMAKE_BUILD_TYPE=${cfg}
+cmake --build build-web -j
+echo "Build WebGPU finalizado em build-web/web/KodaGameDev.html"
+`;
+      downloadText(sh, `compilar_${appName}_webgpu.sh`);
+      setBuildLogs((p) => [...p, `Script Browser WebGPU gerado: compilar_${appName}_webgpu.sh`]);
     } else if (target === 'linux') {
       const sh = `#!/usr/bin/env bash
 set -e
@@ -115,9 +131,14 @@ pause
   const handleTestPipeline = () => {
     const steps: Record<PlatformTarget, string[]> = {
       windows: [
-        `[1/3] Exportando cena e shaders HLSL para build-win/Assets/...`,
-        `[2/3] Executando CMake + MSVC x64 (${cfg}) via CreateProcessA...`,
+        `[1/3] DetectEnvironmentProfile() -> WindowsNative -> DirectX 11 + DXGI Flip-Model...`,
+        `[2/3] Executando CMake + MSVC x64 (${cfg}) com Win32 ThreadPool + AVX2...`,
         `[3/3] OK — ${appName}.exe pronto em build-win/bin/${cfg}/KodaGameDev.exe`,
+      ],
+      webgpu: [
+        `[1/3] DetectEnvironmentProfile() -> BrowserWebGPU (__EMSCRIPTEN__) -> WGPU + WGSL...`,
+        `[2/3] Compilando Wasm + GLFW3 + Dear ImGui WGPU backend (${cfg})...`,
+        `[3/3] OK — Pacote WebGPU gerado em build-web/web/KodaGameDev.html`,
       ],
       linux: [
         `[1/3] Aplicando cmake/toolchain-linux.cmake (RHI Vulkan / g++17)...`,
@@ -137,34 +158,40 @@ pause
     <div className="max-w-[1100px] mx-auto px-6 py-8 space-y-6">
       <div className="space-y-1.5">
         <p className="text-xs text-slate-400">
-          3 Possibilidades de Compilação · Integrado na Engine C++17 e Scripts Prontos
+          Detecção Automática de Ambiente · Windows DX11, Browser WebGPU, Linux e Android
         </p>
         <h1 className="font-display text-2xl font-semibold text-white">
-          Compilar .EXE, App Linux e Chamar Android Studio (.APK)
+          Compilar .EXE (DX11), Navegador (WebGPU), Linux e Android (.APK)
         </h1>
       </div>
 
-      {/* 3 Possibilidades */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+      {/* 4 Possibilidades */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         {(
           [
             {
               id: 'windows',
               icon: Monitor,
-              title: '1. Windows (.exe) no Programa',
-              detail: 'Compila direto via CreateProcess + CMake/MSVC x64 com DirectX 11',
+              title: '1. Windows (.exe)',
+              detail: 'Auto DirectX 11 + Flip-Model + Win32 ThreadPool + XInput',
+            },
+            {
+              id: 'webgpu',
+              icon: Globe,
+              title: '2. Browser (WebGPU)',
+              detail: 'Auto Emscripten Wasm + WGPU/WGSL + GLFW3 no navegador',
             },
             {
               id: 'linux',
               icon: Terminal,
-              title: '2. App Linux (.AppImage)',
-              detail: 'Compilação C++17 + Vulkan + empacotamento AppDir / WSL',
+              title: '3. App Linux',
+              detail: 'Compilação C++17 + Vulkan + empacotamento .AppImage',
             },
             {
               id: 'android',
               icon: Smartphone,
-              title: '3. Android Studio (.apk)',
-              detail: 'Gera projeto Gradle/JNI e abre o studio64.exe ou roda gradlew',
+              title: '4. Android (.apk)',
+              detail: 'Gera projeto Gradle/JNI e abre o Android Studio',
             },
           ] as const
         ).map((item) => {
@@ -252,6 +279,8 @@ pause
                 <ExternalLink className="w-3 h-3" />
                 {target === 'windows'
                   ? 'Baixar Script .EXE (.bat)'
+                  : target === 'webgpu'
+                  ? 'Baixar Script WebGPU (.sh)'
                   : target === 'linux'
                   ? 'Baixar Script Linux (.sh)'
                   : 'Baixar Script Android Studio (.bat)'}

@@ -20,8 +20,13 @@ import {
 } from 'lucide-react';
 import {
   cloneParsedModel,
+  type BoneRestTransform,
   type ParsedModelResult,
 } from '../utils/modelLoaders';
+import {
+  ANIMATION_LIBRARY,
+  type AnimationLibraryPreset,
+} from '../utils/animationLibrary';
 import {
   compileUnityScript,
   type CompiledScriptFn,
@@ -50,6 +55,7 @@ import {
 } from '../utils/platformRuntime';
 import {
   DEFAULT_INPUT_SETTINGS,
+  type AnimatorTransition,
   type EngineEntity,
   type EngineInputSettings,
   type GizmoMode,
@@ -65,6 +71,7 @@ interface Viewport3DProps {
   entities: EngineEntity[];
   scripts: ScriptAsset[];
   parsedModels: Record<string, ParsedModelResult>;
+  transitions?: AnimatorTransition[];
   selectedId: number | null;
   onSelectEntity: (id: number | null) => void;
   onTransformEntity: (id: number, pos: Vec3, rot: Vec3, scale: Vec3) => void;
@@ -391,30 +398,95 @@ function buildHouseVisual(entityId: number, color: string): {
   return { root, wallMat };
 }
 
+function buildDroneVisual(entityId: number, color: string): {
+  root: THREE.Group;
+  rotors: THREE.Object3D[];
+  bodyMat: THREE.MeshStandardMaterial;
+} {
+  const root = new THREE.Group();
+  root.userData.entityId = entityId;
+  const tag = (o: THREE.Object3D) => {
+    o.userData.entityId = entityId;
+    return o;
+  };
+  const bodyMat = new THREE.MeshStandardMaterial({ color, metalness: 0.72, roughness: 0.24 });
+  const darkMat = new THREE.MeshStandardMaterial({ color: '#0F172A', metalness: 0.6, roughness: 0.35 });
+  const eyeMat = new THREE.MeshBasicMaterial({ color: '#38BDF8' });
+
+  const hull = tag(new THREE.Mesh(new THREE.SphereGeometry(0.36, 16, 12), bodyMat));
+  hull.scale.set(1.2, 0.72, 1.0);
+  const eye = tag(new THREE.Mesh(new THREE.SphereGeometry(0.14, 12, 10), eyeMat));
+  eye.position.set(0, 0, 0.3);
+
+  const arm = tag(new THREE.Mesh(new THREE.BoxGeometry(1.35, 0.08, 0.14), darkMat));
+  arm.position.y = 0.12;
+
+  const rotors: THREE.Object3D[] = [];
+  for (const sx of [-0.62, 0.62]) {
+    const bladeGroup = new THREE.Group();
+    bladeGroup.position.set(sx, 0.2, 0);
+    const bladeA = tag(new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.03, 0.08), darkMat));
+    const bladeB = tag(new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.03, 0.56), darkMat));
+    bladeGroup.add(bladeA, bladeB);
+    root.add(bladeGroup);
+    rotors.push(bladeGroup);
+  }
+
+  root.add(hull, eye, arm);
+  return { root, rotors, bodyMat };
+}
+
+type TrackEntry = { time: number; value: number; interpolation: 'linear' | 'smooth' | 'step' };
+const indexedTrackCache = new WeakMap<readonly Omit<TimelineKeyframe, 'id'>[], Map<string, TrackEntry[]>>();
+
+function getIndexedTracks(keyframes: readonly Omit<TimelineKeyframe, 'id'>[]): Map<string, TrackEntry[]> {
+  let map = indexedTrackCache.get(keyframes);
+  if (!map) {
+    map = new Map();
+    for (let i = 0; i < keyframes.length; i++) {
+      const k = keyframes[i];
+      const key = `${k.targetName}:${k.property}:${k.axis}`;
+      let list = map.get(key);
+      if (!list) {
+        list = [];
+        map.set(key, list);
+      }
+      list.push({ time: k.time, value: k.value, interpolation: k.interpolation ?? 'smooth' });
+    }
+    map.forEach((arr) => arr.sort((a, b) => a.time - b.time));
+    indexedTrackCache.set(keyframes, map);
+  }
+  return map;
+}
+
 function sampleTrackValue(
-  keyframes: TimelineKeyframe[],
+  keyframes: readonly Omit<TimelineKeyframe, 'id'>[],
   targetName: string,
   property: 'position' | 'rotation' | 'scale',
   axis: 'x' | 'y' | 'z',
   time: number
 ): number | null {
-  const track = keyframes
-    .filter((k) => k.targetName === targetName && k.property === property && k.axis === axis)
-    .sort((a, b) => a.time - b.time);
-  if (track.length === 0) return null;
+  if (keyframes.length === 0) return null;
+  const track = getIndexedTracks(keyframes).get(`${targetName}:${property}:${axis}`);
+  if (!track || track.length === 0) return null;
   if (time <= track[0].time) return track[0].value;
-  if (time >= track[track.length - 1].time) return track[track.length - 1].value;
+  const last = track[track.length - 1];
+  if (time >= last.time) return last.value;
   for (let i = 0; i < track.length - 1; i++) {
     const a = track[i];
     const b = track[i + 1];
     if (time >= a.time && time <= b.time) {
+      if (a.interpolation === 'step') return a.value;
       const span = Math.max(0.0001, b.time - a.time);
-      const t = (time - a.time) / span;
+      const rawT = (time - a.time) / span;
+      const t = a.interpolation === 'smooth' ? rawT * rawT * (3 - 2 * rawT) : rawT;
       return a.value + (b.value - a.value) * t;
     }
   }
-  return track[track.length - 1].value;
+  return last.value;
 }
+
+const libraryPresetMap = new Map<string, AnimationLibraryPreset>(ANIMATION_LIBRARY.map((p) => [p.id, p]));
 
 function getEntityFeetHalfHeight(e: EngineEntity): number {
   if (
@@ -448,6 +520,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   entities,
   scripts,
   parsedModels,
+  transitions = [],
   selectedId,
   onSelectEntity,
   onTransformEntity,
@@ -512,6 +585,8 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   scriptsRef.current = scripts;
   const parsedModelsRef = useRef(parsedModels);
   parsedModelsRef.current = parsedModels;
+  const transitionsRef = useRef(transitions);
+  transitionsRef.current = transitions;
   const selectedRef = useRef(selectedId);
   selectedRef.current = selectedId;
   const playStateRef = useRef({ isPlaying, isPaused, clipPreviewPlaying, clipScrubTime });
@@ -531,6 +606,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   const keysDownRef = useRef<Set<string>>(new Set());
   const touchStateRef = useRef(createInitialTouchState());
   const mouseStateRef = useRef(createInitialMouseState());
+  const mouseDownAtRef = useRef(0);
+  const pointerDragDistRef = useRef(0);
+  const clickAttackUntilRef = useRef(0);
   const lastKeyboardAtRef = useRef(0);
   const playStartAtRef = useRef(0);
   const split2PActiveRef = useRef(false);
@@ -1057,8 +1135,10 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       spawnerCrate?: SpawnerCrateVisualNodes;
       spiderLegs?: THREE.Group[];
       spiderMat?: THREE.MeshStandardMaterial;
+      rotors?: THREE.Object3D[];
       light?: THREE.PointLight;
       bonesMap?: Map<string, THREE.Object3D>;
+      boneRestMap?: Record<string, BoneRestTransform>;
       mixer?: THREE.AnimationMixer;
       activeClipName?: string | null;
       skeletonHelper?: THREE.SkeletonHelper;
@@ -1095,8 +1175,12 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       downPos.y = e.clientY;
       lastClientX = e.clientX;
       lastClientY = e.clientY;
+      pointerDragDistRef.current = 0;
       if (playStateRef.current.isPlaying) {
-        if (e.button === 0) mouseStateRef.current.leftDown = true;
+        if (e.button === 0) {
+          mouseStateRef.current.leftDown = true;
+          mouseDownAtRef.current = performance.now();
+        }
         if (e.button === 2) mouseStateRef.current.rightDown = true;
         mouseStateRef.current.lastClickAt = performance.now();
       }
@@ -1107,15 +1191,23 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       mouseStateRef.current.ndcX = ((e.clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1;
       mouseStateRef.current.ndcY = -((e.clientY - rect.top) / Math.max(1, rect.height)) * 2 + 1;
       if (playStateRef.current.isPlaying && (e.buttons & 1 || e.buttons & 2)) {
-        mouseStateRef.current.deltaX += e.clientX - lastClientX;
-        mouseStateRef.current.deltaY += e.clientY - lastClientY;
+        const dx = e.clientX - lastClientX;
+        const dy = e.clientY - lastClientY;
+        mouseStateRef.current.deltaX += dx;
+        mouseStateRef.current.deltaY += dy;
+        pointerDragDistRef.current += Math.hypot(dx, dy);
       }
       lastClientX = e.clientX;
       lastClientY = e.clientY;
     };
 
     const onPointerUp = (e: PointerEvent) => {
-      if (e.button === 0) mouseStateRef.current.leftDown = false;
+      if (e.button === 0) {
+        mouseStateRef.current.leftDown = false;
+        if (playStateRef.current.isPlaying && pointerDragDistRef.current <= 6) {
+          clickAttackUntilRef.current = performance.now() + 140;
+        }
+      }
       if (e.button === 2) mouseStateRef.current.rightDown = false;
       if (playStateRef.current.isPlaying) return;
       if (e.button !== 0 || isDraggingGizmo || transformGizmo.axis !== null) return;
@@ -1153,15 +1245,25 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     renderer.domElement.addEventListener('pointerup', onPointerUp);
 
     let resizeRaf = 0;
+    let resizeTimer = 0;
+    let lastObsW = Math.max(1, container.clientWidth);
+    let lastObsH = Math.max(1, container.clientHeight);
     const ro = new ResizeObserver(() => {
-      cancelAnimationFrame(resizeRaf);
-      resizeRaf = requestAnimationFrame(() => {
-        const w = Math.max(1, container.clientWidth);
-        const h = Math.max(1, container.clientHeight);
-        editorCamera.aspect = w / h;
-        editorCamera.updateProjectionMatrix();
-        renderer.setSize(w, h, false);
-      });
+      const w = Math.max(1, container.clientWidth);
+      const h = Math.max(1, container.clientHeight);
+      if (w === lastObsW && h === lastObsH) return;
+      lastObsW = w;
+      lastObsH = h;
+      clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(() => {
+        cancelAnimationFrame(resizeRaf);
+        resizeRaf = requestAnimationFrame(() => {
+          if (disposed) return;
+          editorCamera.aspect = w / h;
+          editorCamera.updateProjectionMatrix();
+          renderer.setSize(w, h, false);
+        });
+      }, 0);
     });
     ro.observe(container);
 
@@ -1176,7 +1278,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     let totalClock = 0;
     let nextProjId = 1;
 
-    // Pools compartilhados para Zero-GC no loop (projéteis, vetores e listas por frame)
+    // Pools compartilhados para Zero-GC no loop (projéteis, grade espacial O(1) e listas por frame)
     const sharedProjectileGeo = new THREE.SphereGeometry(0.18, 10, 8);
     const projectileMatCache = new Map<string, THREE.MeshBasicMaterial>();
     const staticPlatformsPool: EngineEntity[] = [];
@@ -1184,7 +1286,18 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     const livingPlayersPool: EngineEntity[] = [];
     const activeEnemiesPool: EngineEntity[] = [];
     const spawnersPool: EngineEntity[] = [];
+    const obstaclesPool: EngineEntity[] = [];
+    const pendingSpawnsPool: EngineEntity[] = [];
     const enabledCamsPool: EngineEntity[] = [];
+    const spatialBuckets = new Map<number, EngineEntity[]>();
+    const spatialBucketPool: EngineEntity[][] = [];
+    let usedBucketCount = 0;
+    const SPATIAL_CELL = 3.0;
+    const spatialKey = (x: number, z: number) => {
+      const cx = Math.floor(x / SPATIAL_CELL) & 0xffff;
+      const cz = Math.floor(z / SPATIAL_CELL) & 0xffff;
+      return (cx << 16) | cz;
+    };
     const fallbackC2 = editorCamera.clone();
     const poseScratch: HumanoidPose = {
       hipsPosY: 0.9,
@@ -1201,6 +1314,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       shinR: { x: 10, y: 0, z: 0 },
     };
     const poseOverridesScratch: Record<string, Vec3> = {};
+    const mouseEffective = createInitialMouseState();
 
     if (!usingWebGPU && !isSoftwareGl && renderer.compile) {
       renderer.compile(scene, editorCamera);
@@ -1515,31 +1629,60 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         }
       }
 
+      const isOrbitDragging = pointerDragDistRef.current > 6;
+      mouseEffective.leftDown =
+        now < clickAttackUntilRef.current ||
+        (mouseStateRef.current.leftDown && !isOrbitDragging && now - mouseDownAtRef.current > 90);
+      mouseEffective.rightDown = mouseStateRef.current.rightDown && !isOrbitDragging;
+      mouseEffective.ndcX = mouseStateRef.current.ndcX;
+      mouseEffective.ndcY = mouseStateRef.current.ndcY;
+      mouseEffective.deltaX = mouseStateRef.current.deltaX;
+      mouseEffective.deltaY = mouseStateRef.current.deltaY;
+      mouseEffective.lastClickAt = mouseStateRef.current.lastClickAt;
+
       const inputFrame: UnifiedInputFrame = {
         keysDown: keysDownRef.current,
         touch: touchStateRef.current,
-        mouse: mouseStateRef.current,
+        mouse: mouseEffective,
         gamepads,
         lastKeyboardAt: lastKeyboardAtRef.current,
         splitScreen2PActive: split2PActiveRef.current,
         settings,
       };
 
-      // Pre-coleta única por frame em pools reutilizáveis (Zero-GC, evita N× .filter())
+      // Pre-coleta única por frame em pools reutilizáveis + Grade Espacial O(1) (Zero-GC)
       staticPlatformsPool.length = 0;
       playersPool.length = 0;
       livingPlayersPool.length = 0;
       activeEnemiesPool.length = 0;
       spawnersPool.length = 0;
+      obstaclesPool.length = 0;
+      pendingSpawnsPool.length = 0;
       enabledCamsPool.length = 0;
+      spatialBuckets.clear();
+      usedBucketCount = 0;
+
       for (let i = 0; i < currentList.length; i++) {
         const item = currentList[i];
         if (item.script.mechanicPreset === 'EnemySpawner') {
           spawnersPool.push(item);
+          if (item.active && (item.health?.currentHp ?? 1) > 0) obstaclesPool.push(item);
         } else if (item.active && item.health?.team === 'enemy') {
           activeEnemiesPool.push(item);
+          if (!gizmoCfgRef.current.is2DView) {
+            const sk = spatialKey(item.position.x, item.position.z);
+            let bucket = spatialBuckets.get(sk);
+            if (!bucket) {
+              bucket = spatialBucketPool[usedBucketCount] ?? (spatialBucketPool[usedBucketCount] = []);
+              bucket.length = 0;
+              usedBucketCount++;
+              spatialBuckets.set(sk, bucket);
+            }
+            bucket.push(item);
+          }
         }
         if (!item.active) continue;
+        if (item.visualArchetype === 'house') obstaclesPool.push(item);
         if (item.kind === 'Camera' && (item.camera?.enabled ?? true)) {
           enabledCamsPool.push(item);
         }
@@ -1557,6 +1700,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       if (playing && !gameSessionRef.current.gameOver) {
         const staticPlatforms = staticPlatformsPool;
         const aiStride = Math.max(2, runtime.aiStaggerStride);
+        const transitionsList = transitionsRef.current;
 
         for (const e of currentList) {
           if (!e.active) continue;
@@ -1566,7 +1710,39 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
 
           const attackUntil = attackAnimUntilRef.current.get(e.id) ?? 0;
           if (simClock > attackUntil && e.animator.currentState === 'Attack') {
-            e.animator.currentState = 'Idle';
+            e.animator.currentState = e.animator.paramSpeed > 0.1 ? 'Walk' : 'Idle';
+          }
+
+          // Avalia máquina de estados customizada do Animator (se houver transições configuradas)
+          if (e.animator.enabled && transitionsList.length > 0 && simClock > attackUntil) {
+            const clipDurSt = Math.max(0.2, e.animator.clipDuration);
+            const clipNorm = (simClock % clipDurSt) / clipDurSt;
+            for (let ti = 0; ti < transitionsList.length; ti++) {
+              const tr = transitionsList[ti];
+              if (tr.from !== e.animator.currentState) continue;
+              const cond = tr.condition.trim().toLowerCase();
+              let matched = false;
+              if (cond === 'triggerattack' && e.animator.triggerAttack) {
+                matched = true;
+                e.animator.triggerAttack = false;
+              } else if (cond === 'isgrounded == false' && !e.animator.paramGrounded) {
+                matched = true;
+              } else if (cond === 'isgrounded == true' && e.animator.paramGrounded) {
+                matched = true;
+              } else if (cond === 'speed > 3.5' && e.animator.paramSpeed > 3.5) {
+                matched = true;
+              } else if (cond === 'speed > 0.1' && e.animator.paramSpeed > 0.1) {
+                matched = true;
+              } else if (cond === 'speed <= 0.1' && e.animator.paramSpeed <= 0.1) {
+                matched = true;
+              } else if (cond.startsWith('clipnormalized') && clipNorm >= 0.96) {
+                matched = true;
+              }
+              if (matched) {
+                e.animator.currentState = tr.to;
+                break;
+              }
+            }
           }
 
           const slot: 1 | 2 = e.playerSlot === 2 ? 2 : 1;
@@ -1756,22 +1932,32 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
                 ai.targetId = nearest ? nearest.id : null;
                 ai.distToNearest = minD;
 
-                // Separação leve com limite de vizinhos para impedir empilhamento sem custo O(N^2)
+                // Separação O(1) via Grade Espacial (zero alocação, até 4 vizinhos próximos)
                 let sx = 0;
                 let sz = 0;
-                if (minD < 20) {
+                if (minD < 20 && !gizmoCfgRef.current.is2DView) {
+                  const baseCx = Math.floor(e.position.x / SPATIAL_CELL);
+                  const baseCz = Math.floor(e.position.z / SPATIAL_CELL);
                   let checked = 0;
-                  for (let ei = 0; ei < activeEnemiesPool.length; ei++) {
-                    const other = activeEnemiesPool[ei];
-                    if (other.id === e.id) continue;
-                    const ox = e.position.x - other.position.x;
-                    const oz = gizmoCfgRef.current.is2DView ? 0 : e.position.z - other.position.z;
-                    const d2 = ox * ox + oz * oz;
-                    if (d2 > 0.001 && d2 < 1.35) {
-                      const inv = (1.16 - Math.sqrt(d2)) / Math.sqrt(d2);
-                      sx += ox * inv;
-                      sz += oz * inv;
-                      if (++checked >= 4) break;
+                  for (let gx = -1; gx <= 1 && checked < 4; gx++) {
+                    for (let gz = -1; gz <= 1 && checked < 4; gz++) {
+                      const k = (((baseCx + gx) & 0xffff) << 16) | ((baseCz + gz) & 0xffff);
+                      const bucket = spatialBuckets.get(k);
+                      if (!bucket) continue;
+                      for (let bi = 0; bi < bucket.length; bi++) {
+                        const other = bucket[bi];
+                        if (other.id === e.id) continue;
+                        const ox = e.position.x - other.position.x;
+                        const oz = e.position.z - other.position.z;
+                        const d2 = ox * ox + oz * oz;
+                        if (d2 > 0.001 && d2 < 1.35) {
+                          const dLen = Math.sqrt(d2);
+                          const inv = (1.16 - dLen) / dLen;
+                          sx += ox * inv;
+                          sz += oz * inv;
+                          if (++checked >= 4) break;
+                        }
+                      }
                     }
                   }
                 }
@@ -1882,7 +2068,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
                     spawned.script = { ...spawned.script, scriptAssetId: null, mechanicPreset: 'ZombieEnemy', spinSpeedDeg: 0, params: { moveSpeed: 2.4, jumpForce: 0, rotateSpeed: 0, amplitude: 1.25 } };
                     spawned.animator = { ...spawned.animator, enabled: true, currentState: 'Walk' };
                   }
-                  currentList.push(spawned);
+                  pendingSpawnsPool.push(spawned);
                   activeEnemiesPool.push(spawned);
                   hitFlashUntilRef.current.set(e.id, simClock + 0.14);
                 }
@@ -1906,7 +2092,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
             else e.rotation.y += e.script.spinSpeedDeg * dt;
           }
 
-          // 2. Física + Gravidade + Colisão AABB em Plataformas
+          // 2. Física + Gravidade + Colisão AABB em Plataformas & Obstáculos (Casas e Caixas)
           if (e.physics.enabled && !e.physics.isStatic) {
             const prevY = e.position.y;
             if (e.physics.useGravity) e.physics.velocity.y -= 17.5 * dt;
@@ -1962,10 +2148,37 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
               e.animator.paramGrounded = false;
             }
 
+            // Empurra entidades dinâmicas para fora de casas e caixas nascedoras sólidas (XZ AABB)
+            if (!gizmoCfgRef.current.is2DView) {
+              for (let oi = 0; oi < obstaclesPool.length; oi++) {
+                const obs = obstaclesPool[oi];
+                if (obs.id === e.id) continue;
+                const obsW = Math.abs(obs.scale.x) * 0.5 + halfW;
+                const obsD = Math.abs(obs.scale.z) * 0.5 + halfD;
+                const dx = e.position.x - obs.position.x;
+                const dz = e.position.z - obs.position.z;
+                if (Math.abs(dx) < obsW && Math.abs(dz) < obsD) {
+                  const penX = obsW - Math.abs(dx);
+                  const penZ = obsD - Math.abs(dz);
+                  if (penX < penZ) {
+                    e.position.x += dx >= 0 ? penX : -penX;
+                  } else {
+                    e.position.z += dz >= 0 ? penZ : -penZ;
+                  }
+                }
+              }
+            }
+
             if (e.position.y < -8) {
               e.position = { ...gameSessionRef.current.spawnPos };
               e.physics.velocity = { x: 0, y: 0, z: 0 };
             }
+          }
+        }
+
+        if (pendingSpawnsPool.length > 0) {
+          for (let i = 0; i < pendingSpawnsPool.length; i++) {
+            currentList.push(pendingSpawnsPool[i]);
           }
         }
 
@@ -2216,7 +2429,6 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         const camObj = cfg.projection === 'Orthographic' ? camEntry.ortho : camEntry.persp;
         const shakeX = playing && camShakeRef.current > 0.01 ? (Math.random() - 0.5) * camShakeRef.current : 0;
         const shakeY = playing && camShakeRef.current > 0.01 ? (Math.random() - 0.5) * camShakeRef.current : 0;
-        camObj.position.set(camEnt.position.x + shakeX, camEnt.position.y + shakeY, camEnt.position.z);
         camObj.near = Math.max(0.05, cfg.nearClip);
         camObj.far = Math.max(camObj.near + 1, cfg.farClip);
 
@@ -2239,8 +2451,16 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
             sLook.y += (goalLookY - sLook.y) * lookAlpha;
             sLook.z += (goalLookZ - sLook.z) * lookAlpha;
           }
-          camObj.lookAt(sLook);
+          if (cfg.projection === 'Orthographic') {
+            const orthoZ = Math.max(10, Math.abs(camEnt.position.z) || 16);
+            camObj.position.set(camEnt.position.x + shakeX, camEnt.position.y + shakeY, orthoZ);
+            camObj.lookAt(camEnt.position.x + shakeX, camEnt.position.y + shakeY, 0);
+          } else {
+            camObj.position.set(camEnt.position.x + shakeX, camEnt.position.y + shakeY, camEnt.position.z);
+            camObj.lookAt(sLook);
+          }
         } else {
+          camObj.position.set(camEnt.position.x + shakeX, camEnt.position.y + shakeY, camEnt.position.z);
           camObj.rotation.set(
             THREE.MathUtils.degToRad(camEnt.rotation.x),
             THREE.MathUtils.degToRad(camEnt.rotation.y),
@@ -2381,6 +2601,17 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
               root: can.root,
               spiderMat: can.bodyMat,
             };
+          } else if (e.visualArchetype === 'drone') {
+            const drone = buildDroneVisual(e.id, e.color);
+            scene.add(drone.root);
+            rec = {
+              kind: e.kind,
+              primitive: e.primitive,
+              visualArchetype: e.visualArchetype,
+              root: drone.root,
+              rotors: drone.rotors,
+              spiderMat: drone.bodyMat,
+            };
           } else if (e.visualArchetype === 'house') {
             const house = buildHouseVisual(e.id, e.color);
             scene.add(house.root);
@@ -2393,7 +2624,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
             };
           } else if (e.primitive === 'CustomModel' && e.modelAssetId && parsedModelsRef.current[e.modelAssetId]) {
             const parsed = parsedModelsRef.current[e.modelAssetId];
-            const { root: modelRoot, bonesMap } = cloneParsedModel(parsed);
+            const { root: modelRoot, bonesMap, boneRestMap } = cloneParsedModel(parsed);
             modelRoot.userData.entityId = e.id;
             modelRoot.traverse((child) => {
               child.userData.entityId = e.id;
@@ -2415,6 +2646,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
               modelAssetId: e.modelAssetId,
               root: modelRoot,
               bonesMap,
+              boneRestMap,
               mixer,
               activeClipName: null,
               skeletonHelper,
@@ -2435,28 +2667,62 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         root.visible = e.kind === 'Camera' ? !playStateRef.current.isPlaying && e.active : e.active;
         if (rec.skeletonHelper) rec.skeletonHelper.visible = e.active && e.showSkeletonHelper;
 
-        const clipDur = Math.max(0.2, e.animator.clipDuration);
-        const animTime = playing ? (simClock % clipDur) : playStateRef.current.clipScrubTime;
+        const activeStateDef = e.animator.states?.find((s) => s.name === e.animator.currentState);
+        const stateSpeed = activeStateDef?.speed ?? e.animator.clipSpeed ?? 1.0;
+        const stateLoop = activeStateDef?.loop ?? e.animator.clipLoop ?? true;
+        const stateLibId =
+          activeStateDef?.source === 'library'
+            ? activeStateDef.libraryPresetId ?? e.animator.libraryPresetId ?? null
+            : !e.animator.useKeyframes && e.animator.libraryPresetId
+            ? e.animator.libraryPresetId
+            : null;
+        const stateClip =
+          activeStateDef?.source === 'clip' && activeStateDef.clipId
+            ? e.animator.clips.find((c) => c.id === activeStateDef.clipId) ?? null
+            : null;
+        const libPreset = stateLibId ? libraryPresetMap.get(stateLibId) ?? null : null;
+
+        const evalKeyframesSource: readonly Omit<TimelineKeyframe, 'id'>[] | null =
+          e.animator.useKeyframes && e.animator.keyframes.length > 0
+            ? e.animator.keyframes
+            : stateClip && stateClip.keyframes.length > 0
+            ? stateClip.keyframes
+            : libPreset && libPreset.keyframes.length > 0
+            ? libPreset.keyframes
+            : null;
+
+        const clipDur = Math.max(
+          0.2,
+          libPreset?.duration ?? stateClip?.duration ?? e.animator.clipDuration
+        );
+        const rawTime = (playing ? simClock : playStateRef.current.clipScrubTime) * Math.max(0.1, stateSpeed);
+        const animTime = stateLoop ? rawTime % clipDur : Math.min(rawTime, clipDur);
         const shouldEvalKeyframes =
-          e.animator.useKeyframes &&
-          e.animator.keyframes.length > 0 &&
-          (playing || playStateRef.current.clipPreviewPlaying || e.id === selectedRef.current);
+          evalKeyframesSource !== null &&
+          (playing ||
+            playStateRef.current.clipPreviewPlaying ||
+            (e.animator.useKeyframes && e.id === selectedRef.current));
 
         if (!isDraggingGizmo || e.id !== selectedRef.current || e.selectedBone) {
           let px = e.position.x, py = e.position.y, pz = e.position.z;
           let rx = e.rotation.x, ry = e.rotation.y, rz = e.rotation.z;
           let sx = e.scale.x, sy = e.scale.y, sz = e.scale.z;
 
-          if (shouldEvalKeyframes) {
-            px = sampleTrackValue(e.animator.keyframes, '__root__', 'position', 'x', animTime) ?? px;
-            py = sampleTrackValue(e.animator.keyframes, '__root__', 'position', 'y', animTime) ?? py;
-            pz = sampleTrackValue(e.animator.keyframes, '__root__', 'position', 'z', animTime) ?? pz;
-            rx = sampleTrackValue(e.animator.keyframes, '__root__', 'rotation', 'x', animTime) ?? rx;
-            ry = sampleTrackValue(e.animator.keyframes, '__root__', 'rotation', 'y', animTime) ?? ry;
-            rz = sampleTrackValue(e.animator.keyframes, '__root__', 'rotation', 'z', animTime) ?? rz;
-            sx = sampleTrackValue(e.animator.keyframes, '__root__', 'scale', 'x', animTime) ?? sx;
-            sy = sampleTrackValue(e.animator.keyframes, '__root__', 'scale', 'y', animTime) ?? sy;
-            sz = sampleTrackValue(e.animator.keyframes, '__root__', 'scale', 'z', animTime) ?? sz;
+          if (shouldEvalKeyframes && evalKeyframesSource) {
+            px = sampleTrackValue(evalKeyframesSource, '__root__', 'position', 'x', animTime) ?? px;
+            const rootOffY = sampleTrackValue(evalKeyframesSource, '__root__', 'position', 'y', animTime);
+            if (rootOffY !== null) py = libPreset ? e.position.y + rootOffY : rootOffY;
+            pz = sampleTrackValue(evalKeyframesSource, '__root__', 'position', 'z', animTime) ?? pz;
+            rx = sampleTrackValue(evalKeyframesSource, '__root__', 'rotation', 'x', animTime) ?? rx;
+            const rootOffRy = sampleTrackValue(evalKeyframesSource, '__root__', 'rotation', 'y', animTime);
+            if (rootOffRy !== null) ry = libPreset ? e.rotation.y + rootOffRy : rootOffRy;
+            rz = sampleTrackValue(evalKeyframesSource, '__root__', 'rotation', 'z', animTime) ?? rz;
+            const ksX = sampleTrackValue(evalKeyframesSource, '__root__', 'scale', 'x', animTime);
+            const ksY = sampleTrackValue(evalKeyframesSource, '__root__', 'scale', 'y', animTime);
+            const ksZ = sampleTrackValue(evalKeyframesSource, '__root__', 'scale', 'z', animTime);
+            if (ksX !== null) sx = libPreset ? e.scale.x * ksX : ksX;
+            if (ksY !== null) sy = libPreset ? e.scale.y * ksY : ksY;
+            if (ksZ !== null) sz = libPreset ? e.scale.z * ksZ : ksZ;
           }
 
           // Rotação acrobática durante Capoeira 360° ou Rolamento de esquiva
@@ -2497,11 +2763,22 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           }
         } else if (e.kind !== 'Camera') {
           const tex = getTextureForEntity(e);
+          const aiDist = playing ? mobAiMapRef.current.get(e.id)?.distToNearest ?? 0 : 0;
+          const skipBoneUpdate =
+            playing &&
+            !isPlayerLike(e) &&
+            aiDist > 26 &&
+            (globalFrameIndex + e.id) % 3 !== 0;
+
+          const resolvedBlenderClipName =
+            activeStateDef?.source === 'blender' && activeStateDef.blenderClipName
+              ? activeStateDef.blenderClipName
+              : e.activeBlenderClip;
 
           if (rec.mixer && e.modelAssetId && parsedModelsRef.current[e.modelAssetId]) {
             const parsed = parsedModelsRef.current[e.modelAssetId];
-            if (e.activeBlenderClip && !e.animator.useKeyframes) {
-              const clip = parsed.clips.find((c) => c.name === e.activeBlenderClip);
+            if (resolvedBlenderClipName && !e.animator.useKeyframes) {
+              const clip = parsed.clips.find((c) => c.name === resolvedBlenderClipName);
               if (clip) {
                 if (rec.activeClipName !== clip.name) {
                   rec.mixer.stopAllAction();
@@ -2510,10 +2787,12 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
                   action.play();
                   rec.activeClipName = clip.name;
                 }
-                if (playing) {
-                  rec.mixer.update(dt * e.blenderClipSpeed);
-                } else {
-                  rec.mixer.setTime(playStateRef.current.clipScrubTime * e.blenderClipSpeed);
+                if (!skipBoneUpdate) {
+                  if (playing) {
+                    rec.mixer.update(dt * e.blenderClipSpeed * Math.max(0.1, stateSpeed));
+                  } else {
+                    rec.mixer.setTime(playStateRef.current.clipScrubTime * e.blenderClipSpeed);
+                  }
                 }
               }
             } else if (rec.activeClipName) {
@@ -2534,19 +2813,11 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
             rec.humanoid.bodyMat.roughness = e.roughness;
             rec.humanoid.bodyMat.wireframe = e.wireframe || wireRef.current;
 
-            rec.humanoid.shadowDisc.position.y = -e.position.y + 0.02;
+            rec.humanoid.shadowDisc.position.y = -e.position.y + 0.028;
             (rec.humanoid.shadowDisc.material as THREE.MeshBasicMaterial).opacity = Math.max(
               0.15,
               0.72 - e.position.y * 0.22
             );
-
-            // LOD de animação: mobs distantes (>26m) atualizam ossos a 1/3 da frequência
-            const aiDist = playing ? mobAiMapRef.current.get(e.id)?.distToNearest ?? 0 : 0;
-            const skipBoneUpdate =
-              playing &&
-              !isPlayerLike(e) &&
-              aiDist > 26 &&
-              (globalFrameIndex + e.id) % 3 !== 0;
 
             if (!skipBoneUpdate) {
               const isZomb = e.script.mechanicPreset === 'ZombieEnemy' || e.health?.team === 'enemy';
@@ -2569,7 +2840,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
               ) {
                 pose = evaluateRealisticHumanoidPose({
                   state: e.animator.currentState,
-                  time: playing ? simClock + e.id * 0.37 : animTime,
+                  time: playing ? simClock * Math.max(0.2, stateSpeed) + e.id * 0.37 : animTime,
                   isZombie: isZomb,
                 });
               } else {
@@ -2611,7 +2882,10 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
               }
 
               for (const k in poseOverridesScratch) delete poseOverridesScratch[k];
-              if (shouldEvalKeyframes || (isDraggingGizmo && e.id === selectedRef.current && e.selectedBone)) {
+              if (
+                (shouldEvalKeyframes && evalKeyframesSource) ||
+                (isDraggingGizmo && e.id === selectedRef.current && e.selectedBone)
+              ) {
                 const allBoneKeys = [
                   'spine',
                   'head',
@@ -2628,10 +2902,10 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
                   if (isDraggingGizmo && e.id === selectedRef.current && e.selectedBone === b) {
                     continue;
                   }
-                  if (shouldEvalKeyframes) {
-                    const kx = sampleTrackValue(e.animator.keyframes, b, 'rotation', 'x', animTime);
-                    const ky = sampleTrackValue(e.animator.keyframes, b, 'rotation', 'y', animTime);
-                    const kz = sampleTrackValue(e.animator.keyframes, b, 'rotation', 'z', animTime);
+                  if (shouldEvalKeyframes && evalKeyframesSource) {
+                    const kx = sampleTrackValue(evalKeyframesSource, b, 'rotation', 'x', animTime);
+                    const ky = sampleTrackValue(evalKeyframesSource, b, 'rotation', 'y', animTime);
+                    const kz = sampleTrackValue(evalKeyframesSource, b, 'rotation', 'z', animTime);
                     if (kx !== null || ky !== null || kz !== null) {
                       poseOverridesScratch[b] = { x: kx ?? pose[b].x, y: ky ?? pose[b].y, z: kz ?? pose[b].z };
                     }
@@ -2660,24 +2934,43 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
               leg.rotation.y = Math.sin(tSp + idx * 1.4) * 0.35;
               leg.rotation.z = Math.cos(tSp + idx * 1.4) * 0.16;
             });
+          } else if (rec.rotors && rec.spiderMat) {
+            rec.spiderMat.color.set(isFlashing ? '#FCA5A5' : e.color);
+            rec.spiderMat.emissive.set(isFlashing ? '#DC2626' : '#000000');
+            rec.spiderMat.emissiveIntensity = isFlashing ? 0.65 : 0;
+            const spinR = totalClock * 18;
+            for (let ri = 0; ri < rec.rotors.length; ri++) {
+              rec.rotors[ri].rotation.y = ri % 2 === 0 ? spinR : -spinR;
+            }
           } else if (rec.spiderMat) {
             rec.spiderMat.color.set(isFlashing ? '#FCA5A5' : e.color);
             rec.spiderMat.emissive.set(isFlashing ? '#DC2626' : '#000000');
             rec.spiderMat.emissiveIntensity = isFlashing ? 0.65 : 0;
-          } else if (rec.bonesMap && (!e.activeBlenderClip || e.animator.useKeyframes)) {
+          } else if (rec.bonesMap && (!resolvedBlenderClipName || e.animator.useKeyframes) && !skipBoneUpdate) {
             rec.bonesMap.forEach((node, boneName) => {
               if (isDraggingGizmo && e.id === selectedRef.current && e.selectedBone === boneName) return;
+              const rest = rec.boneRestMap?.[boneName];
               const ov = e.boneOverrides[boneName];
-              let rx = ov ? ov.rotation.x : THREE.MathUtils.radToDeg(node.rotation.x);
-              let ry = ov ? ov.rotation.y : THREE.MathUtils.radToDeg(node.rotation.y);
-              let rz = ov ? ov.rotation.z : THREE.MathUtils.radToDeg(node.rotation.z);
+              let rx = ov ? ov.rotation.x : rest ? rest.rot.x : THREE.MathUtils.radToDeg(node.rotation.x);
+              let ry = ov ? ov.rotation.y : rest ? rest.rot.y : THREE.MathUtils.radToDeg(node.rotation.y);
+              let rz = ov ? ov.rotation.z : rest ? rest.rot.z : THREE.MathUtils.radToDeg(node.rotation.z);
 
-              if (shouldEvalKeyframes) {
-                rx = sampleTrackValue(e.animator.keyframes, boneName, 'rotation', 'x', animTime) ?? rx;
-                ry = sampleTrackValue(e.animator.keyframes, boneName, 'rotation', 'y', animTime) ?? ry;
-                rz = sampleTrackValue(e.animator.keyframes, boneName, 'rotation', 'z', animTime) ?? rz;
+              if (shouldEvalKeyframes && evalKeyframesSource) {
+                rx = sampleTrackValue(evalKeyframesSource, boneName, 'rotation', 'x', animTime) ?? rx;
+                ry = sampleTrackValue(evalKeyframesSource, boneName, 'rotation', 'y', animTime) ?? ry;
+                rz = sampleTrackValue(evalKeyframesSource, boneName, 'rotation', 'z', animTime) ?? rz;
+                const bpx = sampleTrackValue(evalKeyframesSource, boneName, 'position', 'x', animTime);
+                const bpy = sampleTrackValue(evalKeyframesSource, boneName, 'position', 'y', animTime);
+                const bpz = sampleTrackValue(evalKeyframesSource, boneName, 'position', 'z', animTime);
+                if (bpx !== null || bpy !== null || bpz !== null) {
+                  node.position.set(
+                    bpx ?? ov?.position?.x ?? rest?.pos.x ?? node.position.x,
+                    bpy ?? ov?.position?.y ?? rest?.pos.y ?? node.position.y,
+                    bpz ?? ov?.position?.z ?? rest?.pos.z ?? node.position.z
+                  );
+                }
               }
-              if (ov || shouldEvalKeyframes) {
+              if (ov || shouldEvalKeyframes || rest) {
                 node.rotation.set(
                   THREE.MathUtils.degToRad(rx),
                   THREE.MathUtils.degToRad(ry),
@@ -2833,13 +3126,13 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         monitorCamEnt = enabledCams.find((c) => c.camera?.showMonitor) ?? null;
       }
 
-      // Pass de Monitor PiP ("mostrar monitor")
+      // Pass de Monitor PiP ("mostrar monitor") — WebGPU usa origem Y no topo, WebGL na base
       if (monitorCamEnt && w > 340 && h > 220) {
         const isMed = monitorCamEnt.camera?.monitorSize === 'medium';
         const mw = isMed ? 280 : 210;
         const mh = isMed ? 158 : 118;
         const mx = w - mw - 14;
-        const my = 46;
+        const my = usingWebGPU ? Math.max(0, h - mh - 46) : 46;
 
         const gizmoPrev = gizmoHelper.visible;
         const selPrev = selectionBox.visible;
@@ -2944,6 +3237,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     cleanupFn = () => {
       cancelAnimationFrame(animFrame);
       clearTimeout(pacingTimer);
+      clearTimeout(resizeTimer);
       cancelAnimationFrame(resizeRaf);
       clearProjectiles();
       sharedProjectileGeo.dispose();
