@@ -1,0 +1,6 @@
+{
+  "name": "Koda Game Dev",
+  "description": "Engine 3D nativa em C++17 (Win32, DirectX 11, Dear ImGui) com arquitetura multiplataforma, ECS, RDG, editor de shaders e estudo interativo.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
